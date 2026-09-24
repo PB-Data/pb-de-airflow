@@ -15,9 +15,17 @@ _factory.py), jadi kalimat inilah yang membuatnya dibaca.
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
-from _factory import build_broken_dag, build_ingestion_dag
+# Airflow 3 tidak menaruh folder dags di sys.path saat DAG processor mem-parse
+# file (terbukti di VM: "No module named '_factory'"). Ditambahkan sendiri
+# supaya _factory.py di sebelah file ini bisa diimpor, apa pun versinya.
+_FOLDER_DAGS = str(Path(__file__).resolve().parent)
+if _FOLDER_DAGS not in sys.path:
+    sys.path.insert(0, _FOLDER_DAGS)
+
+from _factory import build_broken_dag, build_ingestion_dag  # noqa: E402
 
 from pb_dwh.config.loader import config_dir, load_source_config
 
