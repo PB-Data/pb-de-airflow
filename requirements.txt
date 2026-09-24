@@ -1,0 +1,12 @@
+# Dependency runtime pipeline. Versi di-pin semua.
+#
+# PENTING: file ini untuk menjalankan pipeline di LAPTOP (testing lokal).
+# Di VM, versi yang dipakai adalah yang tertulis di docker/Dockerfile.
+# Kalau mengubah versi di sini, ubah juga di sana -- keduanya belum
+# disatukan. Lihat README bagian "Menyamakan versi".
+#
+# Paket `dlt` = Apache 2.0. JANGAN memasang `dlthub` (produk berbayar).
+
+dlt[bigquery,filesystem,parquet]==1.30.0
+pyodbc==5.2.0
+PyYAML==6.0.2
