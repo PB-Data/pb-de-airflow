@@ -238,17 +238,52 @@ say "Validasi config di container"
 c exec -T airflow-scheduler python -m pb_dwh.cli validate </dev/null \
   || die "config ditolak di VM (lihat pesan di atas). $BALIK"
 
-say "Parse ulang DAG"
-c exec -T airflow-scheduler airflow dags reserialize </dev/null >/dev/null 2>&1 \
-  || echo "(reserialize dilewati; DAG processor tetap mem-parse ulang sendiri dalam beberapa puluh detik)"
-c exec -T airflow-scheduler airflow dags list-import-errors </dev/null || true
-RUSAK=$(c exec -T airflow-scheduler airflow dags list -o plain </dev/null 2>/dev/null \
-  | grep -o 'bronze_ingest_RUSAK[A-Za-z0-9_]*' | sort -u || true)
+# Folder DAG di-parse langsung di container, bukan membaca status dari
+# database: database baru terbarui setelah DAG processor mem-parse ulang
+# (berkala), jadi yang terbaca tepat setelah git pull bisa masih hasil versi
+# lama. DagBag memakai aturan yang sama dengan DAG processor, termasuk
+# dag_discovery_safe_mode, dan tidak menulis apa pun ke database.
+PARSE=$(cat <<'PY'
+import sys
+from airflow.configuration import conf
+try:
+    from airflow.dag_processing.dagbag import DagBag
+except ImportError:
+    from airflow.models.dagbag import DagBag
+
+bag = DagBag(conf.get("core", "dags_folder"), include_examples=False)
+masalah = 0
+for berkas, err in sorted(bag.import_errors.items()):
+    masalah += 1
+    print(f">> IMPORT ERROR {berkas}")
+    for baris in err.strip().splitlines()[-3:]:
+        print(f">>     {baris}")
+for dag_id in sorted(bag.dag_ids):
+    dag = bag.dags[dag_id]
+    jumlah = len(dag.tasks)
+    if "_RUSAK_" in dag_id:
+        masalah += 1
+        print(f">> DAG {dag_id}: RUSAK")
+        for baris in (dag.doc_md or "").replace("```", "").strip().splitlines():
+            if baris.strip():
+                print(f">>     {baris.strip()}")
+    elif jumlah == 0:
+        masalah += 1
+        print(f">> DAG {dag_id}: 0 task (tidak akan memuat apa pun)")
+    else:
+        print(f">> DAG {dag_id}: {jumlah} task")
+sys.exit(1 if masalah else 0)
+PY
+)
+
+say "Parse DAG di container"
+HASIL=$(c exec -T airflow-scheduler python -c "$PARSE" </dev/null 2>/dev/null) && RC=0 || RC=$?
+printf '%s\n' "$HASIL" | sed -n 's/^>> //p'
 
 say "Selesai: VM di $BRANCH @ ${BARU:0:7}"
-if [ -n "$RUSAK" ]; then
-  echo "PERHATIAN: ada DAG rusak, buka tab Docs-nya di Airflow UI:"
-  echo "$RUSAK"
+if [ "$RC" != 0 ]; then
+  echo "PERHATIAN: ada DAG yang bermasalah (lihat di atas). DAG processor akan"
+  echo "menampilkan hal yang sama di UI dalam beberapa puluh detik."
   exit 1
 fi
 REMOTE

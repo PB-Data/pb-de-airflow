@@ -41,6 +41,14 @@ TIMEZONE = os.environ.get("PB_DWH_TIMEZONE", "Asia/Jakarta")
 
 def build_ingestion_dag(cfg: SourceConfig) -> DAG:
     """Bangun satu DAG berisi satu task per tabel."""
+    # Dibangun SEBELUM `with DAG(...)`: kalau env var atau config kurang,
+    # errornya terjadi sebelum ada objek DAG. DAG yang dibuat di dalam blok
+    # `with` terdaftar otomatis walau bloknya keluar karena error, dan hasilnya
+    # DAG kosong 0 task yang tetap terjadwal -- terlihat "sukses" tiap hari tanpa
+    # memuat apa pun (pernah terjadi di VM, di samping DAG RUSAK-nya).
+    pipeline = build_pipeline(cfg)
+    source = build_source(cfg)
+
     with DAG(
         dag_id=cfg.dag_id,
         schedule=cfg.schedule,
@@ -79,9 +87,6 @@ def build_ingestion_dag(cfg: SourceConfig) -> DAG:
             retry_pipeline_steps=("load",),
             wipe_local_data=True,
         )
-
-        pipeline = build_pipeline(cfg)
-        source = build_source(cfg)
 
         # decompose="serialize" memecah source jadi satu task per tabel yang
         # jalan berurutan dalam satu pipeline state. Berurutan itu disengaja:
