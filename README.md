@@ -285,16 +285,36 @@ cd /opt/pb-dwh/docker    # atau lokasi compose di VM
 docker compose up -d
 ```
 
-Selanjutnya, untuk setiap perubahan config, SQL, atau kode Python:
+Selanjutnya, untuk setiap perubahan config, SQL, atau kode Python, jalankan
+dari laptop (Git Bash di Windows, atau terminal biasa di macOS/Linux):
 
 ```bash
-cd /data/airflow/repo && git pull
+scripts/deploy.sh --dry-run   # cek saja: working tree bersih, test lolos, sudah di-push
+scripts/deploy.sh             # deploy branch aktif ke VM
+scripts/deploy.sh --push      # git push dulu, lalu deploy
 ```
 
-Rebuild image **hanya** perlu kalau versi paket di `docker/Dockerfile` berubah:
+Yang dikirim ke VM hanya commit yang sudah ada di GitHub; VM menarik sendiri
+lewat git. Script menolak kalau:
+
+- ada perubahan lokal yang belum di-commit, atau commit yang belum di-push;
+- pytest atau `cli validate` gagal (kalau `.venv` ada);
+- ada file yang diubah langsung di VM — supaya tidak tertimpa diam-diam;
+- branch di VM punya commit yang tidak ada di GitHub.
+
+Setelah `git pull` di VM, script memvalidasi config di dalam container,
+mem-parse ulang DAG, lalu melaporkan import error dan DAG `RUSAK` bila ada.
+`docker/.env` tidak pernah ikut; isinya diatur langsung di VM.
+
+Rebuild image **hanya** perlu kalau `docker/Dockerfile` atau
+`docker-compose.yml` berubah. Script memberi peringatan kalau itu terjadi; jalankan
+ulang dengan `--rebuild` untuk `docker compose up -d --build`.
+
+Tanpa script (langsung di VM):
 
 ```bash
-docker compose build && docker compose up -d
+cd /data/airflow/repo && sudo git -c safe.directory=$PWD pull --ff-only \
+  && sudo chown -R 50000:0 .
 ```
 
 ---
