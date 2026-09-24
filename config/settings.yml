@@ -8,7 +8,9 @@
 # Jadi: taruh yang berlaku umum di sini, yang khusus di file source.
 
 defaults:
-  write_disposition: merge      # merge | replace | append
+  # replace | append. `merge` sah di config tapi BELUM didukung alur
+  # GCS -> BigQuery (ditolak saat validasi). Kalau ragu, replace selalu benar.
+  write_disposition: replace
   cursor_type: datetime         # datetime | integer
   lookback_days: 3
   lookback: 0
@@ -20,7 +22,10 @@ defaults:
 pipeline:
   backend: pyarrow
   loader_file_format: parquet
-  staging_prefix: dlt-staging   # folder di dalam bucket GCS
+  # Folder raw di dalam bucket GCS_STAGING_BUCKET. Kosong = root bucket:
+  #   gs://<bucket>/<source>/<tabel>/<tanggal>/<load_id>.<n>.parquet
+  # Setiap run disimpan (tidak ditimpa); umur file diatur lifecycle bucket.
+  raw_prefix: ""
 
 # Setelan Airflow. Bisa ditimpa per source di blok `source:`.
 airflow:

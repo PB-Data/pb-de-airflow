@@ -74,7 +74,9 @@ class SourceConfig:
     database: str = ""
     backend: str = "pyarrow"
     loader_file_format: str = "parquet"
-    staging_prefix: str = "dlt-staging"
+    # Folder di dalam bucket GCS tempat Parquet raw ditulis. Kosong = langsung
+    # di root bucket: gs://<bucket>/<source>/<tabel>/<tanggal>/...
+    raw_prefix: str = ""
     source_file: str = "<memory>"
 
     # Setelan Airflow. Ada di sini supaya jadwal sebuah source bisa diubah
@@ -237,6 +239,16 @@ def validate_table(table: TableConfig, source_file: str) -> None:
             "Pilih salah satu: hapus cursor, atau ganti ke merge.",
         )
 
+    # Lookback sengaja mengambil ulang baris lama. Dengan append, baris itu
+    # masuk lagi sebagai baris baru: duplikat yang bertambah tiap run.
+    if table.write_disposition == "append" and (table.lookback_days or table.lookback):
+        fail(
+            source_file,
+            t,
+            "write_disposition 'append' tidak boleh dipakai bersama lookback. Baris yang "
+            "diambil ulang akan tercatat dua kali. Hapus lookback, atau pakai merge.",
+        )
+
     if table.lookback_days and not table.cursor:
         fail(
             source_file,
@@ -351,3 +363,27 @@ def validate_source(source: SourceConfig) -> None:
 
     for t in source.tables:
         validate_table(t, f)
+
+
+# ---------------------------------------------------------------------------
+# Dukungan alur SQL Server -> GCS -> BigQuery
+# ---------------------------------------------------------------------------
+
+
+def periksa_dukungan_alur(source: SourceConfig) -> None:
+    """Tolak setelan yang sah secara config tapi belum didukung alur dua task.
+
+    Dipisah dari validate_source karena ini batasan implementasi saat ini,
+    bukan aturan config: begitu MERGE ditulis di task BigQuery, cukup hapus
+    pemeriksaan ini. Dipanggil oleh DAG (config ditolak -> DAG RUSAK) dan
+    oleh `cli validate`.
+    """
+    for t in source.tables:
+        if t.write_disposition == "merge":
+            fail(
+                source.source_file,
+                t.name,
+                "write_disposition 'merge' belum didukung alur GCS -> BigQuery. "
+                "Pakai 'replace' (tabel kecil, atau tanpa kolom waktu yang bisa "
+                "dipercaya) atau 'append' (tabel yang hanya bertambah, tanpa lookback).",
+            )

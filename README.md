@@ -6,12 +6,18 @@ layer bronze, lalu mentransformasinya ke silver.
 Alur datanya:
 
 ```
-SQL Server  --(dlt, PyArrow)-->  Parquet di GCS  --(BigQuery load job)-->  bronze
-                                                                             |
-                                                        (BigQueryInsertJobOperator)
-                                                                             v
-                                                                           silver
+             task <tabel>.ke_gcs                         task <tabel>.ke_bq
+SQL Server --(dlt, PyArrow)--> Parquet di GCS (raw) --(BigQuery load job)--> bronze
+                               semua run disimpan,                             |
+                               per folder tanggal          (BigQueryInsertJobOperator)
+                                                                               v
+                                                                             silver
 ```
+
+Setiap tabel dua task: `ke_gcs` menulis Parquet ke
+`gs://<GCS_STAGING_BUCKET>/<source>/<tabel>/<tanggal>/`, lalu `ke_bq` memuat
+tepat file-file run itu ke tabel bronze. Kalau load ke BigQuery gagal, cukup
+ulang `ke_bq` — SQL Server tidak dibaca ulang.
 
 Dijadwalkan oleh Apache Airflow 3.1.6 yang berjalan di VM GCP dengan Docker
 Compose.
@@ -44,6 +50,7 @@ config/
   examples/erp_mssql.yml    contoh semua pola setelan; TIDAK dibaca Airflow
 sql/
   silver/*.sql              query transform, satu file = satu task <-- SERING DIEDIT
+  ddl/<bq_dataset>.sql      dataset & tabel bronze, dijalankan manual di BigQuery
 dags/
   bronze_ingest.py          baca config, bikin DAG
   _factory.py               isi DAG-nya
@@ -53,7 +60,8 @@ src/pb_dwh/
   sources/mssql.py          bangun dlt source dari config
   sources/types.py          penyesuaian tipe SQL Server
   state/incremental.py      cursor & lookback
-  sinks/bigquery.py         pipeline dlt -> GCS -> BigQuery
+  sinks/gcs.py              tahap 1: dlt -> Parquet di GCS (raw)
+  sinks/bigquery.py         tahap 2: load job GCS -> tabel bronze
   bronze/runner.py          perekat; dipakai DAG maupun CLI
   cli.py                    perkakas testing lokal
 docker/                     Dockerfile, compose, contoh .env
@@ -67,21 +75,26 @@ Yang sehari-hari diedit hanya dua baris pertama. Sisanya jarang berubah.
 
 ## Menambah tabel baru
 
-Buka file source yang sesuai di `config/sources/`, lalu tambahkan satu entri di
-bawah `tables:`.
+Dua langkah, dua file:
+
+1. **Tabel bronze-nya dulu.** Tambahkan `CREATE TABLE` di
+   `sql/ddl/<bq_dataset>.sql` dan jalankan di BigQuery. Tabel tidak dibuat
+   otomatis; task `ke_bq` gagal kalau tabelnya belum ada. Aturan tipe kolomnya
+   ada di kepala file DDL itu.
+2. **Lalu config-nya.** Buka file source yang sesuai di `config/sources/`, lalu
+   tambahkan satu entri di bawah `tables:`.
 
 ```yaml
   - name: nama_tabel_di_sql_server
     primary_key: [kolom_id]
-    cursor: modified_at
-    lookback_days: 2
+    write_disposition: replace
 ```
 
 Lalu periksa dan deploy:
 
 ```bash
 python -m pb_dwh.cli validate          # pastikan config sah
-git add config/ && git commit -m "Tambah tabel nama_tabel"
+git add config/ sql/ddl/ && git commit -m "Tambah tabel nama_tabel"
 git push
 ```
 
@@ -97,13 +110,17 @@ Airflow memungut perubahannya sendiri. Tidak perlu restart apa pun.
 
 | Kondisi tabel di SQL Server | Setelan yang dipakai |
 |---|---|
-| Ada kolom waktu yang ikut berubah saat baris di-update | `cursor: <kolom>` + `lookback_days` |
-| Hanya bertambah, tidak pernah di-update (log, transaksi) | `cursor: <kolom_id>` + `cursor_type: integer` + `lookback` |
 | Kecil (< 100 ribu baris) dan barisnya bisa dihapus | `write_disposition: replace`, tanpa cursor |
 | Tidak ada kolom waktu maupun id urut | `write_disposition: replace`, tanpa cursor |
+| Hanya bertambah, tidak pernah di-update (log, transaksi) | `write_disposition: append` + `cursor: <kolom_id>` + `cursor_type: integer`, **tanpa** lookback |
+| Ada kolom waktu yang ikut berubah saat baris di-update | `merge` + `cursor` + `lookback_days` — **belum didukung**, pakai `replace` dulu |
 
-Kalau ragu, mulai dari `replace`. Itu selalu benar, hanya lebih boros. Pindah ke
-incremental setelah tahu kolom mana yang bisa dipercaya.
+Kalau ragu, mulai dari `replace`. Itu selalu benar, hanya lebih boros.
+
+`merge` (upsert berdasarkan `primary_key`) sah di config tapi belum didukung
+alur GCS → BigQuery: config yang memakainya ditolak `cli validate` dan
+DAG-nya muncul sebagai `RUSAK`. MERGE akan ditulis di task `ke_bq` saat tabel
+incremental pertama benar-benar dibutuhkan.
 
 ### Kenapa butuh `lookback_days`
 
@@ -115,7 +132,9 @@ seperti itu terlewat selamanya tanpa ada error apa pun.
 `lookback_days: 2` membuat pipeline selalu mundur 2 hari. Baris yang sama
 memang terambil berulang kali — dan itu tidak masalah, karena
 `write_disposition: merge` dengan `primary_key` akan menimpanya, bukan
-menduplikasinya.
+menduplikasinya. Karena itu lookback hanya berguna bersama `merge` (belum
+didukung, lihat di atas); `append` + lookback ditolak karena menghasilkan
+duplikat.
 
 ---
 
@@ -130,7 +149,7 @@ menduplikasinya.
 | `lookback_days` | tidak | Mundur berapa hari; hanya untuk `cursor_type: datetime` |
 | `lookback` | tidak | Mundur berapa nilai cursor; hanya untuk `cursor_type: integer` |
 | `initial_value` | tidak | Titik mulai saat run pertama. Berguna agar tidak menarik data 10 tahun ke belakang |
-| `write_disposition` | tidak | `merge` (default), `replace`, atau `append` |
+| `write_disposition` | tidak | `replace` (default) atau `append`. `merge` belum didukung alur GCS → BigQuery |
 | `exclude_columns` | tidak | Kolom yang tidak ikut, mis. `varbinary(max)` |
 | `column_overrides` | tidak | Paksa tipe kolom tertentu |
 | `chunk_size` | tidak | Baris per batch; kecilkan untuk tabel sangat lebar |
@@ -467,16 +486,27 @@ menit.
 Tanpa ini, DAG processor akan membuka koneksi ke SQL Server setiap kali DAG
 di-parse — untuk 100 tabel, setiap 30 detik, selamanya.
 
-**`decompose="serialize"`.** Satu task per tabel, dijalankan berurutan.
-Berurutan itu disengaja: dua tabel besar yang diekstrak bersamaan adalah cara
-tercepat menghabiskan RAM 20 GB. Paralelisme diatur antar-DAG lewat pool
-`dlt_ingest`, bukan di dalam satu DAG.
+**Dua task per tabel: `ke_gcs` lalu `ke_bq`.** `ke_gcs` menjalankan dlt dengan
+tujuan GCS (selalu `append`, satu folder per tanggal, jadi GCS menyimpan riwayat
+setiap run) dan mengembalikan daftar file yang ditulisnya lewat XCom. `ke_bq`
+memuat tepat file-file itu, bukan menebak dari tanggal. Task `ke_gcs` antar-tabel
+dirantai berurutan: dua tabel besar yang diekstrak bersamaan adalah cara
+tercepat menghabiskan RAM 20 GB. `ke_bq` ringan, jadi boleh jalan bersamaan
+dengan ekstraksi tabel berikutnya. Paralelisme antar-DAG diatur pool
+`dlt_ingest` (hanya dipakai `ke_gcs`).
+
+Helper Airflow bawaan dlt (`PipelineTasksGroup`) sengaja tidak dipakai: ia
+menjalankan extract sampai load dalam satu task dan tidak mengembalikan info
+load, jadi tahap BigQuery tidak bisa dipisah.
 
 **`backend="pyarrow"`, bukan `connectorx`.** Jalur Arrow → Parquet membuat tahap
 normalize dlt hampir tanpa biaya, dan itu yang paling menentukan hemat memori.
 
-**Ada `staging`, jadi BigQuery memakai load job.** Bukan streaming insert. Lebih
-murah, tidak kena kuota streaming, dan data langsung bisa di-query.
+**BigQuery diisi load job dari Parquet di GCS.** Bukan streaming insert: lebih
+murah, tidak kena kuota streaming, dan data langsung bisa di-query. `replace`
+memakai `WRITE_TRUNCATE_DATA`, yang menimpa data tapi mempertahankan skema,
+PRIMARY KEY, dan CLUSTER BY dari DDL — `WRITE_TRUNCATE` biasa justru mengganti
+skema dengan skema file dan membuang constraint.
 
 **`DLT_PROJECT_DIR` dan `DLT_DATA_DIR` sengaja berbeda.** Yang pertama menunjuk
 ke repo (tempat `.dlt/config.toml`), yang kedua ke disk data (tempat file kerja
@@ -489,17 +519,21 @@ naming `sql_cs_v1`, jadi `AIMHeader.nomorAIM` di SQL Server tetap
 dlt (`snake_case`) akan menghasilkan `aim_header.nomor_aim`. Mengganti naming
 setelah data produksi dimuat berarti membuang dan memuat ulang semua tabel.
 
-**Kolom datetime mendarat sebagai `TIMESTAMP`, bukan `DATETIME`.** dlt 1.30
-selalu menulis `TIMESTAMP` ke BigQuery. Bronze Datastream memakai `DATETIME`,
+**Kolom datetime mendarat sebagai `TIMESTAMP`, bukan `DATETIME`.** Parquet
+tulisan dlt menyimpan waktu sebagai timestamp UTC, dan kolom `TIMESTAMP` di DDL
+harus cocok dengannya. Bronze Datastream memakai `DATETIME`,
 jadi query silver lama perlu `DATETIME(kolom)` di kolom waktu. Nilainya jam WIB
 apa adanya berlabel UTC; jangan pakai `DATETIME(kolom, 'Asia/Jakarta')`.
 
 **Dataset dan tabel bronze dibuat manual**, dari file di `sql/ddl/`, sebelum
 DAG-nya jalan pertama kali. SA Airflow hanya punya `bigquery.dataEditor` di
 dataset itu dan `bigquery.jobUser` di project, jadi tidak bisa membuat dataset
-atau menulis ke dataset lain. dlt tetap membuat tiga tabel internalnya sendiri
-(`_dlt_loads`, `_dlt_version`, `_dlt_pipeline_state`), dan akan membuat tabel
-data yang belum ada — jadi jalankan DDL-nya dulu sebelum menambah tabel di YAML.
+atau menulis ke dataset lain. Load job memakai `CREATE_NEVER`: tabel yang belum
+dibuat membuat `ke_bq` gagal dengan pesan yang menunjuk ke file DDL, bukan
+muncul sendiri dengan tipe tebakan. Kolom baru di SQL Server juga membuat load
+gagal sampai kolomnya ditambahkan di DDL — skema bronze hanya berubah lewat DDL
+yang di-commit. State dlt (termasuk nilai cursor incremental) disimpan di GCS,
+bukan di BigQuery.
 
 **Dataset dlt terpisah dari dataset Datastream.** Datastream lama menulis ke
 `pb_bronze_dc_<dc>_dbo`; dlt menulis ke `pb_bronze_dlt_dc_<dc>_dbo`. Tabel

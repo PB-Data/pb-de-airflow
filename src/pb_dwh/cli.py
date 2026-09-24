@@ -1,9 +1,9 @@
 """CLI untuk testing lokal tanpa menyentuh Airflow.
 
     python -m pb_dwh.cli validate
-    python -m pb_dwh.cli list --source erp_mssql
-    python -m pb_dwh.cli check-connection --source erp_mssql
-    python -m pb_dwh.cli run --source erp_mssql --table sales_order --dev
+    python -m pb_dwh.cli list --source dc_sby
+    python -m pb_dwh.cli check-connection --source dc_sby
+    python -m pb_dwh.cli run --source dc_sby --table AIMHeader --dev
 
 `validate` dan `list` tidak menyentuh jaringan sama sekali, jadi aman
 dijalankan di mana pun, termasuk di CI.
@@ -21,7 +21,7 @@ from pb_dwh.config.loader import (
     load_all_source_configs,
     load_source_config,
 )
-from pb_dwh.config.models import ConfigError, SourceConfig
+from pb_dwh.config.models import ConfigError, SourceConfig, periksa_dukungan_alur
 
 
 def _siapkan_log(verbose: bool) -> None:
@@ -49,6 +49,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     konfigurasi = load_all_source_configs()
     total = 0
     for cfg in konfigurasi:
+        periksa_dukungan_alur(cfg)
         print(f"OK  {cfg.source_file:<24} source={cfg.name:<16} schema={cfg.schema:<10} "
               f"dataset={cfg.bq_dataset:<16} tabel={len(cfg.tables)}")
         total += len(cfg.tables)
@@ -132,13 +133,18 @@ def cmd_check_connection(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = _cari_source(args.source)
-    info = run_source(
+    ringkasan = run_source(
         cfg,
         table_names=args.table or None,
         pipelines_dir=args.pipelines_dir,
         dev_mode=args.dev,
     )
-    print(info)
+    for r in ringkasan:
+        gcs, bq = r["gcs"], r["bigquery"]
+        print(
+            f"{gcs['table']}: {gcs['rows']} baris -> {len(gcs['files'])} file GCS -> "
+            f"{bq['rows']} baris di {bq['table']}"
+        )
     return 0
 
 
@@ -172,7 +178,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--dev",
         action="store_true",
-        help="tulis ke dataset bersufiks supaya tidak menimpa bronze asli",
+        help=(
+            "raw ke folder GCS bersufiks waktu, bronze ke dataset <bq_dataset>_dev "
+            "(dibuat otomatis), supaya tidak menyentuh raw & bronze asli"
+        ),
     )
     p.add_argument("--pipelines-dir", help="folder kerja dlt; default ikut DLT_DATA_DIR")
     p.set_defaults(func=cmd_run)

@@ -128,10 +128,10 @@ def build_source(cfg: SourceConfig, table_names: Sequence[str] | None = None):
     for tabel in terpilih:
         resource = source.resources[tabel.name]
 
-        hints: dict = {"write_disposition": tabel.write_disposition}
-
-        if tabel.write_disposition == "merge":
-            hints["primary_key"] = list(tabel.primary_key)
+        # Selalu append: tujuan dlt adalah lapisan raw di GCS, yang menyimpan
+        # setiap run di folder tanggalnya sendiri. `write_disposition` dari
+        # config (replace/append) baru berlaku di tahap BigQuery.
+        hints: dict = {"write_disposition": "append"}
 
         incremental = build_incremental(tabel)
         if incremental is not None:

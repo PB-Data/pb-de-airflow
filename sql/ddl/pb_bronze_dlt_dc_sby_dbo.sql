@@ -6,19 +6,24 @@
 -- (airflow-pb-dwh) sengaja tidak punya hak itu, dan SA-nya harus sudah dibuat
 -- sebelum GRANT di bawah dijalankan.
 --
--- Syarat supaya tabel cocok dengan yang dikirim dlt. Kalau beda, load job gagal:
+-- Tabel diisi task <tabel>.ke_bq: BigQuery load job dari Parquet yang ditulis
+-- dlt ke GCS. Load job memakai CREATE_NEVER, jadi tabel yang belum ada di sini
+-- membuat task gagal -- tidak ada tabel yang muncul sendiri.
+--
+-- Syarat supaya tabel cocok dengan Parquet-nya. Kalau beda, load job gagal:
 --   * Nama kolom persis seperti di SQL Server (naming sql_cs_v1).
 --   * Kolom datetime SQL Server -> TIMESTAMP, BUKAN DATETIME seperti bronze
---     Datastream. dlt 1.30 selalu menulis TIMESTAMP ke BigQuery. Nilainya jam
---     WIB apa adanya tapi berlabel UTC, jadi di silver pakai DATETIME(kolom),
---     JANGAN DATETIME(kolom, 'Asia/Jakarta') -- itu menggeser 7 jam.
---   * Semua kolom NULLABLE. dlt tidak pernah mengubah tipe atau mode kolom yang
---     sudah ada; kolom baru di SQL Server ditambahkan dlt lewat ADD COLUMN.
+--     Datastream. Parquet tulisan dlt menyimpan waktu sebagai timestamp UTC.
+--     Nilainya jam WIB apa adanya tapi berlabel UTC, jadi di silver pakai
+--     DATETIME(kolom), JANGAN DATETIME(kolom, 'Asia/Jakarta') -- menggeser 7 jam.
+--   * Semua kolom NULLABLE.
+--   * Kolom baru di SQL Server membuat load gagal sampai ditambahkan di sini
+--     (ALTER TABLE ... ADD COLUMN). Disengaja: skema bronze hanya berubah lewat
+--     file ini.
 --   * Tanpa datastream_metadata (itu kolom milik Datastream).
 --
--- dlt tetap membuat sendiri tiga tabel internalnya di dataset ini
--- (_dlt_loads, _dlt_version, _dlt_pipeline_state), jadi SA butuh
--- bigquery.dataEditor di dataset, bukan cuma hak tulis data.
+-- replace memakai WRITE_TRUNCATE_DATA: data ditimpa, tapi PRIMARY KEY dan
+-- CLUSTER BY di bawah tetap utuh.
 
 CREATE SCHEMA IF NOT EXISTS `smi-dwh.pb_bronze_dlt_dc_sby_dbo`
 OPTIONS (
@@ -30,8 +35,8 @@ GRANT `roles/bigquery.dataEditor`
 ON SCHEMA `smi-dwh.pb_bronze_dlt_dc_sby_dbo`
 TO "serviceAccount:airflow-pb-dwh@smi-dwh.iam.gserviceaccount.com";
 
--- AIMHeader: full refresh tiap run (write_disposition: replace). dlt memakai
--- TRUNCATE lalu insert, jadi PRIMARY KEY dan CLUSTER BY di bawah tetap terjaga.
+-- AIMHeader: full refresh tiap run (write_disposition: replace). Riwayat
+-- snapshot hariannya ada di GCS: gs://<bucket>/dc_sby/AIMHeader/<tanggal>/.
 CREATE TABLE IF NOT EXISTS `smi-dwh.pb_bronze_dlt_dc_sby_dbo.AIMHeader`
 (
   IdDC INT64,

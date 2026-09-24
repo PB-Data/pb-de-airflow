@@ -155,6 +155,7 @@ def _bangun_tabel(
 
     cursor = ambil("cursor")
     cursor_type = ambil("cursor_type", "datetime")
+    write_disposition = ambil("write_disposition", "merge")
 
     def ambil_lookback(kunci: str, untuk_cursor_type: str) -> int:
         """Warisi lookback hanya kalau memang masuk akal untuk tabel ini.
@@ -169,7 +170,9 @@ def _bangun_tabel(
         """
         if kunci in mentah:
             return int(mentah[kunci] or 0)
-        if cursor and cursor_type == untuk_cursor_type:
+        # Tabel append tidak mewarisi lookback: append + lookback = duplikat,
+        # dan yang menulis tabelnya tidak pernah meminta lookback itu.
+        if cursor and cursor_type == untuk_cursor_type and write_disposition != "append":
             return int(defaults.get(kunci, 0) or 0)
         return 0
 
@@ -183,7 +186,7 @@ def _bangun_tabel(
         initial_value=normalise_initial_value(
             ambil("initial_value"), cursor_type, nama, source_file
         ),
-        write_disposition=ambil("write_disposition", "merge"),
+        write_disposition=write_disposition,
         chunk_size=int(ambil("chunk_size", 50_000)),
         reflection_level=ambil("reflection_level", "minimal"),
         exclude_columns=as_column_tuple(
@@ -233,7 +236,7 @@ def load_source_config(path: str | Path) -> SourceConfig:
         tables=tabel,
         backend=pipeline.get("backend", "pyarrow"),
         loader_file_format=pipeline.get("loader_file_format", "parquet"),
-        staging_prefix=pipeline.get("staging_prefix", "dlt-staging"),
+        raw_prefix=str(pipeline.get("raw_prefix") or "").strip("/"),
         source_file=path.name,
         schedule=str(airflow.get("schedule", "0 1 * * *")),
         start_date=_sebagai_tanggal(airflow.get("start_date"), path.name),

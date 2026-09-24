@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from pb_dwh.config.loader import load_all_source_configs, load_source_config
-from pb_dwh.config.models import ConfigError, TableConfig
+from pb_dwh.config.models import ConfigError, TableConfig, periksa_dukungan_alur
 
 SOURCE_MINIMAL = """
 source:
@@ -356,6 +356,52 @@ def test_config_repo_sah() -> None:
     akar = Path(__file__).resolve().parents[1]
     konfigurasi = load_all_source_configs(akar / "config" / "sources")
     assert konfigurasi, "tidak ada config source di repo"
+    # Config di repo juga harus bisa dijalankan alur GCS -> BigQuery saat ini,
+    # bukan cuma sah secara config.
+    for cfg in konfigurasi:
+        periksa_dukungan_alur(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Aturan alur GCS -> BigQuery
+# ---------------------------------------------------------------------------
+
+SOURCE_APPEND = """
+source:
+  name: uji
+  env_prefix: UJI
+  schema: dbo
+  bq_dataset: bronze_uji
+defaults:
+  lookback_days: 2
+tables:
+  - name: log
+    write_disposition: append
+    cursor: dibuat_pada
+"""
+
+
+def test_append_tidak_mewarisi_lookback(folder_config: Path) -> None:
+    # defaults punya lookback_days: 2, tapi tabel append tidak memintanya.
+    cfg = load_source_config(tulis_source(folder_config, SOURCE_APPEND))
+    assert cfg.table("log").lookback_days == 0
+
+
+def test_append_dengan_lookback_ditolak(folder_config: Path) -> None:
+    isi = SOURCE_APPEND.replace("cursor: dibuat_pada", "cursor: dibuat_pada\n    lookback_days: 1")
+    with pytest.raises(ConfigError, match="dua kali"):
+        load_source_config(tulis_source(folder_config, isi))
+
+
+def test_merge_sah_di_config_tapi_ditolak_alur(folder_config: Path) -> None:
+    cfg = load_source_config(tulis_source(folder_config, SOURCE_MINIMAL))
+    assert cfg.table("pesanan").write_disposition == "merge"
+    with pytest.raises(ConfigError, match="belum didukung"):
+        periksa_dukungan_alur(cfg)
+
+
+def test_replace_dan_append_didukung_alur(folder_config: Path) -> None:
+    periksa_dukungan_alur(load_source_config(tulis_source(folder_config, SOURCE_APPEND)))
 
 
 def test_config_contoh_sah() -> None:

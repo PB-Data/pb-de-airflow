@@ -2,6 +2,11 @@
 # bawah fiktif. Dipakai sebagai rujukan pola setelan. Untuk source sungguhan,
 # buat file di `config/sources/` (lihat `dc_sby.yml`).
 #
+# PERHATIAN: pola dengan `merge` (default di file ini) sah secara config tapi
+# BELUM didukung alur GCS -> BigQuery; config sungguhan yang memakainya ditolak
+# `cli validate` dan jadi DAG RUSAK. Yang didukung sekarang: `replace`, dan
+# `append` tanpa lookback.
+#
 # Satu file = satu database source = satu DAG = satu schema.
 #
 # Kalau butuh schema lain (mis. `sales` selain `dbo`), buat file baru
