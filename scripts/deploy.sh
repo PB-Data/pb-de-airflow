@@ -169,6 +169,12 @@ else
   WD="$REPO/docker"
   echo "Container airflow-scheduler tidak sedang jalan; memakai $WD."
 fi
+# Membaca daftar container cukup butuh akses ke socket docker, tapi compose
+# juga membaca docker/.env sebagai user yang menjalankannya -- dan file itu
+# biasanya hanya bisa dibaca pemilik repo.
+if [ "$D" = docker ] && [ -e "$WD/.env" ] && [ ! -r "$WD/.env" ]; then
+  D="sudo docker"
+fi
 c() { (cd "$WD" && $D compose "${COMPOSE_ARGS[@]}" "$@"); }
 
 [ -d "$REPO/.git" ] || die "repo git tidak ditemukan di $REPO. Set PB_DWH_REPO_DIR ke lokasi repo di VM."
