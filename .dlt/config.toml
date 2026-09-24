@@ -1,0 +1,50 @@
+# Setelan dlt yang tidak rahasia. File ini DI-COMMIT.
+#
+# Rahasia (kredensial DB, kunci GCP) TIDAK boleh ada di sini. Semuanya lewat
+# environment variable; lihat docker/.env.example.
+#
+# Supaya file ini terbaca di dalam container, DLT_PROJECT_DIR harus menunjuk
+# ke root repo (/opt/pb-dwh), sementara DLT_DATA_DIR menunjuk ke disk data
+# (/opt/dlt) tempat file kerja ditulis. Dua hal berbeda, jangan disamakan.
+
+[runtime]
+log_level = "INFO"
+dlthub_telemetry = false
+
+[schema]
+# Nama tabel & kolom di BigQuery dibiarkan persis seperti di SQL Server
+# (AIMHeader, nomorAIM, IdDC). Default dlt adalah snake_case (aim_header,
+# nomor_aim, id_dc), yang membuat semua query silver yang sudah ditulis
+# terhadap bronze Datastream harus diganti nama kolomnya satu per satu.
+#
+# Ubah ini SEBELUM tabel pertama dimuat ke bronze produksi. Setelahnya,
+# mengganti naming berarti membuang dan memuat ulang semua tabel.
+naming = "sql_cs_v1"
+
+[extract]
+# Satu tabel diekstrak satu per satu (decompose="serialize" di DAG), jadi
+# worker ekstrak tidak perlu banyak.
+workers = 2
+
+[extract.data_writer]
+# Rotasi file: batas utama pengendali memori di VM 20 GB. Tanpa ini, satu
+# tabel besar ditulis sebagai satu file raksasa dan buffer-nya menumpuk
+# di RAM sampai OOM.
+file_max_bytes = 134_217_728      # 128 MB
+buffer_max_items = 20_000
+
+[normalize]
+workers = 2
+
+[normalize.data_writer]
+file_max_bytes = 134_217_728      # 128 MB
+buffer_max_items = 20_000
+# Parquet ditulis per row group supaya penggunaan memori rata, tidak melonjak
+# di akhir file.
+[normalize.data_writer.parquet]
+row_group_size = 100_000
+
+[load]
+# Muat paralel aman: yang dikirim cuma perintah load job ke BigQuery,
+# datanya sudah ada di GCS.
+workers = 4

@@ -1,0 +1,18 @@
+# Dependency runtime pipeline. Versi di-pin semua.
+#
+# PENTING: file ini untuk menjalankan pipeline di LAPTOP (testing lokal).
+# Di VM, versi yang dipakai adalah yang tertulis di docker/Dockerfile.
+# Kalau mengubah versi di sini, ubah juga di sana -- keduanya belum
+# disatukan. Lihat README bagian "Menyamakan versi".
+#
+# Paket `dlt` = Apache 2.0. JANGAN memasang `dlthub` (produk berbayar).
+
+dlt[bigquery,filesystem,parquet]==1.30.0
+pyodbc==5.2.0
+PyYAML==6.0.2
+
+# Dibutuhkan `dlt.sources.sql_database`, tapi tidak ikut terpasang lewat
+# extra di atas. Di VM paket ini sudah dibawa image Airflow, dan versinya
+# dikunci constraints Airflow 3.1.6 di 1.4.54 -- jadi di sini dikunci sama,
+# supaya laptop tidak diam-diam memakai SQLAlchemy 2.x.
+SQLAlchemy==1.4.54
