@@ -4,6 +4,12 @@ Satu file YAML di `config/sources/` menghasilkan satu DAG. File ini hanya
 menjahitnya; logikanya ada di `_factory.py`.
 
 Jangan tambah kode di sini untuk menambah tabel. Tambah di config.
+
+JANGAN hapus kata "airflow" di docstring ini. Dengan dag_discovery_safe_mode
+(default), DAG processor airflow melewati file .py yang tidak memuat kata
+"airflow" -- tanpa error, tanpa import error, DAG-nya diam-diam tidak pernah
+muncul. File ini tidak mengimpor airflow secara langsung (semuanya lewat
+_factory.py), jadi kalimat inilah yang membuatnya dibaca.
 """
 
 from __future__ import annotations
