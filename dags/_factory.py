@@ -41,15 +41,18 @@ TIMEZONE = os.environ.get("PB_DWH_TIMEZONE", "Asia/Jakarta")
 
 def build_ingestion_dag(cfg: SourceConfig) -> DAG:
     """Bangun satu DAG berisi satu task per tabel."""
-    # Dibangun SEBELUM `with DAG(...)`: kalau env var atau config kurang,
-    # errornya terjadi sebelum ada objek DAG. DAG yang dibuat di dalam blok
-    # `with` terdaftar otomatis walau bloknya keluar karena error, dan hasilnya
-    # DAG kosong 0 task yang tetap terjadwal -- terlihat "sukses" tiap hari tanpa
-    # memuat apa pun (pernah terjadi di VM, di samping DAG RUSAK-nya).
-    pipeline = build_pipeline(cfg)
+    # Source dibangun di luar DAG supaya env var MSSQL_* yang kurang langsung
+    # ketahuan. Pipeline TIDAK boleh di sini: dlt mewajibkan pipeline dibuat
+    # SETELAH PipelineTasksGroup (lihat di bawah).
     source = build_source(cfg)
 
+    # auto_register=False: DAG di dalam blok `with` biasanya terdaftar otomatis,
+    # termasuk kalau bloknya keluar karena error. Hasilnya DAG 0 task yang tetap
+    # terjadwal dan "sukses" tiap run tanpa memuat apa pun -- dua kali terjadi di
+    # VM. Tanpa auto-register, hanya DAG yang dikembalikan fungsi ini (lalu
+    # dipasang ke globals() oleh bronze_ingest.py) yang dibaca Airflow.
     with DAG(
+        auto_register=False,
         dag_id=cfg.dag_id,
         schedule=cfg.schedule,
         # Airflow butuh datetime ber-timezone; config menyimpannya sebagai
@@ -87,6 +90,11 @@ def build_ingestion_dag(cfg: SourceConfig) -> DAG:
             retry_pipeline_steps=("load",),
             wipe_local_data=True,
         )
+
+        # Harus SETELAH PipelineTasksGroup: grup itu mengganti DLT_DATA_DIR ke
+        # folder kerja acak, dan add_run menolak pipeline yang dibuat sebelumnya
+        # ("Instantiate PipelineTasksGroup BEFORE creating the Pipeline").
+        pipeline = build_pipeline(cfg)
 
         # decompose="serialize" memecah source jadi satu task per tabel yang
         # jalan berurutan dalam satu pipeline state. Berurutan itu disengaja:
