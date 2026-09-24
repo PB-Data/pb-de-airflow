@@ -51,6 +51,7 @@ KUNCI_SOURCE_DIKENAL = frozenset(
     {
         "name",
         "env_prefix",
+        "database",
         "schema",
         "bq_dataset",
         "schedule",
@@ -226,6 +227,7 @@ def load_source_config(path: str | Path) -> SourceConfig:
     source = SourceConfig(
         name=blok_source.get("name", ""),
         env_prefix=blok_source.get("env_prefix", ""),
+        database=str(blok_source.get("database") or ""),
         schema=blok_source.get("schema", ""),
         bq_dataset=blok_source.get("bq_dataset", ""),
         tables=tabel,

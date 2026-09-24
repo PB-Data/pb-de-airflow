@@ -1,3 +1,7 @@
+# CONTOH. File di folder `config/examples/` TIDAK dibaca Airflow; tabel di
+# bawah fiktif. Dipakai sebagai rujukan pola setelan. Untuk source sungguhan,
+# buat file di `config/sources/` (lihat `dc_sby.yml`).
+#
 # Satu file = satu database source = satu DAG = satu schema.
 #
 # Kalau butuh schema lain (mis. `sales` selain `dbo`), buat file baru
@@ -7,6 +11,7 @@
 source:
   name: erp_mssql               # jadi dag_id `bronze_ingest_erp_mssql`
   env_prefix: MSSQL             # baca MSSQL_HOST, MSSQL_PORT, MSSQL_USER, ...
+  database: ERP                 # opsional; kalau kosong dibaca dari MSSQL_DATABASE
   schema: dbo
   bq_dataset: bronze_erp
 

@@ -79,6 +79,18 @@ def test_membaca_source_minimal(folder_config: Path) -> None:
     assert tabel.write_disposition == "merge"
 
 
+def test_database_opsional(folder_config: Path) -> None:
+    # Tanpa `database`, nama database nanti dibaca dari {env_prefix}_DATABASE.
+    cfg = load_source_config(tulis_source(folder_config, SOURCE_MINIMAL))
+    assert cfg.database == ""
+
+    dengan_database = SOURCE_MINIMAL.replace(
+        "  env_prefix: UJI\n", "  env_prefix: UJI\n  database: PB_DC_SBY\n"
+    )
+    cfg = load_source_config(tulis_source(folder_config, dengan_database))
+    assert cfg.database == "PB_DC_SBY"
+
+
 def test_settings_yml_jadi_default(folder_config: Path) -> None:
     cfg = load_source_config(tulis_source(folder_config, SOURCE_MINIMAL))
 
@@ -101,6 +113,7 @@ def test_setelan_tabel_menang_atas_defaults(folder_config: Path) -> None:
               chunk_size: 500
             tables:
               - name: kecil
+                primary_key: [id]
               - name: besar
                 chunk_size: 10
                 primary_key: [id]
@@ -343,3 +356,13 @@ def test_config_repo_sah() -> None:
     akar = Path(__file__).resolve().parents[1]
     konfigurasi = load_all_source_configs(akar / "config" / "sources")
     assert konfigurasi, "tidak ada config source di repo"
+
+
+def test_config_contoh_sah() -> None:
+    """File di `config/examples/` disalin orang jadi config sungguhan.
+
+    Tidak dibaca Airflow, jadi kalau rusak tidak ada yang sadar sampai
+    salinannya ditolak.
+    """
+    akar = Path(__file__).resolve().parents[1]
+    assert load_all_source_configs(akar / "config" / "examples")

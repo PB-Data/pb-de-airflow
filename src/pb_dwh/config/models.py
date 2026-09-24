@@ -68,6 +68,10 @@ class SourceConfig:
     schema: str
     bq_dataset: str
     tables: tuple[TableConfig, ...]
+    # Nama database di SQL Server. Kosong berarti dibaca dari env var
+    # {env_prefix}_DATABASE. Ditulis di YAML supaya beberapa database di
+    # instance yang sama bisa berbagi satu set kredensial.
+    database: str = ""
     backend: str = "pyarrow"
     loader_file_format: str = "parquet"
     staging_prefix: str = "dlt-staging"

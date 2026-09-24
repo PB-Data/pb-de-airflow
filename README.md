@@ -41,6 +41,7 @@ diatur dari file YAML di `config/sources/`.
 config/
   settings.yml              default global untuk semua source
   sources/*.yml             satu file = satu database = satu DAG   <-- SERING DIEDIT
+  examples/erp_mssql.yml    contoh semua pola setelan; TIDAK dibaca Airflow
 sql/
   silver/*.sql              query transform, satu file = satu task <-- SERING DIEDIT
 dags/
@@ -136,6 +137,22 @@ menduplikasinya.
 | `chunk_size` | tidak | Baris per batch; kecilkan untuk tabel sangat lebar |
 | `reflection_level` | tidak | `minimal` (default), `full`, `full_with_precision` |
 
+Setelan di blok `source:` (sekali per file):
+
+| Kunci | Wajib? | Arti |
+|---|---|---|
+| `name` | ya | Nama source; jadi `dag_id` `bronze_ingest_<name>` |
+| `env_prefix` | ya | Awalan env var kredensial, mis. `MSSQL` → `MSSQL_HOST`, `MSSQL_USER`, ... |
+| `database` | tidak | Nama database di SQL Server. Kalau kosong dibaca dari `<env_prefix>_DATABASE` |
+| `schema` | ya | Schema SQL Server, mis. `dbo` |
+| `bq_dataset` | ya | Dataset tujuan di BigQuery |
+| `schedule`, `start_date`, `pool`, `task_timeout_hours`, `retries` | tidak | Menimpa blok `airflow:` di `settings.yml` |
+
+Database yang berada di instance Cloud SQL yang sama (host & login sama) cukup
+memakai `env_prefix: MSSQL` dan hanya berbeda di `database`. Menambah DC seperti
+itu cukup menyalin `config/sources/dc_sby.yml` — tidak perlu env var baru. DC
+di instance lain butuh `env_prefix` sendiri, mis. `MSSQL_JKT` → `MSSQL_JKT_HOST`.
+
 Config divalidasi sebelum dipakai. Kombinasi yang berbahaya ditolak dengan
 pesan yang menyebut nama file dan tabelnya, misalnya `merge` tanpa
 `primary_key` — yang kalau dibiarkan akan menumpuk duplikat setiap hari tanpa
@@ -178,16 +195,16 @@ set -a && source .env.local && set +a
 python -m pb_dwh.cli validate
 
 # 2. Lihat daftar tabel beserta setelannya
-python -m pb_dwh.cli list --source erp_mssql
+python -m pb_dwh.cli list --source dc_sby
 
 # 3. Uji koneksi ODBC dan cek semua tabel di config memang ada
-python -m pb_dwh.cli check-connection --source erp_mssql
+python -m pb_dwh.cli check-connection --source dc_sby
 
 # 4. Jalankan SATU tabel ke dataset percobaan
-python -m pb_dwh.cli run --source erp_mssql --table sales_order --dev
+python -m pb_dwh.cli run --source dc_sby --table AIMHeader --dev
 
 # 5. Jalankan semua tabel (hati-hati, ini berat)
-python -m pb_dwh.cli run --source erp_mssql --dev
+python -m pb_dwh.cli run --source dc_sby --dev
 ```
 
 **Selalu pakai `--dev` saat testing.** Tanpa flag itu, data ditulis ke dataset
@@ -440,6 +457,19 @@ murah, tidak kena kuota streaming, dan data langsung bisa di-query.
 ke repo (tempat `.dlt/config.toml`), yang kedua ke disk data (tempat file kerja
 ditulis). Kalau keduanya disamakan, `.dlt/config.toml` tidak terbaca dan semua
 setelan rotasi file diam-diam tidak berlaku.
+
+**Nama tabel & kolom tidak diubah ke snake_case.** `.dlt/config.toml` memakai
+naming `sql_cs_v1`, jadi `AIMHeader.nomorAIM` di SQL Server tetap
+`AIMHeader.nomorAIM` di BigQuery — sama dengan bronze Datastream lama, sehingga
+query silver yang sudah ada cukup diganti nama dataset-nya. Default dlt
+(`snake_case`) akan menghasilkan `aim_header.nomor_aim`. Mengganti naming
+setelah data produksi dimuat berarti membuang dan memuat ulang semua tabel.
+
+**Dataset dlt terpisah dari dataset Datastream.** Datastream lama menulis ke
+`pb_bronze_dc_<dc>_dbo`; dlt menulis ke `pb_bronze_dlt_dc_<dc>_dbo`. Tabel
+Datastream punya kolom `datastream_metadata` dan dibaca view di
+`pb_original_data_source`; kalau dlt menulis ke dataset yang sama, tabelnya
+ditimpa dengan schema berbeda dan view-view itu rusak.
 
 **Hanya paket `dlt` (Apache 2.0).** Jangan pasang `dlthub`, itu produk berbayar
 yang berbeda.

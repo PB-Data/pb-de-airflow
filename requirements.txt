@@ -10,3 +10,9 @@
 dlt[bigquery,filesystem,parquet]==1.30.0
 pyodbc==5.2.0
 PyYAML==6.0.2
+
+# Dibutuhkan `dlt.sources.sql_database`, tapi tidak ikut terpasang lewat
+# extra di atas. Di VM paket ini sudah dibawa image Airflow, dan versinya
+# dikunci constraints Airflow 3.1.6 di 1.4.54 -- jadi di sini dikunci sama,
+# supaya laptop tidak diam-diam memakai SQLAlchemy 2.x.
+SQLAlchemy==1.4.54

@@ -65,7 +65,9 @@ def build_connection_url(cfg: SourceConfig) -> sa.engine.URL:
         password=_env(prefix, "PASSWORD"),
         host=_env(prefix, "HOST"),
         port=int(_env(prefix, "PORT", wajib=False, cadangan="1433")),
-        database=_env(prefix, "DATABASE"),
+        # Nama database dari YAML menang; env var hanya cadangan untuk config
+        # yang tidak menuliskannya.
+        database=cfg.database or _env(prefix, "DATABASE"),
         query=query,
     )
 
@@ -108,7 +110,10 @@ def build_source(cfg: SourceConfig, table_names: Sequence[str] | None = None):
     exclude_map = {t.name: t.exclude_columns for t in terpilih if t.exclude_columns}
 
     source = sql_database(
-        credentials=build_connection_url(cfg),
+        # dlt menolak objek sa.URL ("ConnectionStringCredentials cannot parse
+        # the configuration value"), jadi dikirim sebagai string. Hasil render
+        # tetap membawa escape password dari URL.create.
+        credentials=build_connection_url(cfg).render_as_string(hide_password=False),
         schema=cfg.schema,
         table_names=[t.name for t in terpilih],
         chunk_size=chunk_size,

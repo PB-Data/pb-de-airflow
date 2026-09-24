@@ -137,6 +137,7 @@ def _dokumentasi(cfg: SourceConfig) -> str:
         f"### Ingestion bronze: `{cfg.name}`",
         "",
         f"- Config: `config/sources/{cfg.source_file}`",
+        f"- Database source: `{cfg.database or cfg.env_prefix + '_DATABASE (env)'}`",
         f"- Schema source: `{cfg.schema}`",
         f"- Dataset tujuan: `{cfg.bq_dataset}`",
         f"- Jumlah tabel: {len(cfg.tables)}",

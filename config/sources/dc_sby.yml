@@ -1,0 +1,31 @@
+# DC Surabaya: database PB_DC_SBY di Cloud SQL for SQL Server.
+#
+# Host, user, dan password dibaca dari env var MSSQL_* (lihat
+# docker/.env.example). Nama database ditulis di sini, bukan di .env, supaya
+# DC lain di instance yang sama cukup menyalin file ini lalu mengganti
+# `name`, `database`, dan `bq_dataset`.
+
+source:
+  name: dc_sby                  # jadi dag_id `bronze_ingest_dc_sby`
+  env_prefix: MSSQL
+  database: PB_DC_SBY
+  schema: dbo
+
+  # SENGAJA bukan `pb_bronze_dc_sby_dbo`. Dataset itu milik Datastream lama:
+  # tabelnya punya kolom `datastream_metadata` dan dibaca view di
+  # `pb_original_data_source`. Kalau dlt menulis ke sana, tabelnya ditimpa
+  # dengan schema yang berbeda dan view-view itu ikut rusak.
+  bq_dataset: pb_bronze_dlt_dc_sby_dbo
+
+tables:
+
+  # AIMHeader tidak punya kolom last-modified. tglApprove, StatusProses, dan
+  # TglUploadSAP berubah SETELAH baris dibuat, jadi cursor di TanggalCreate
+  # akan melewatkan perubahan itu tanpa pesan error. Tabelnya kecil (1.335
+  # baris per Mei 2026), jadi full refresh tiap run murah dan pasti benar.
+  #
+  # primary_key tidak dipakai oleh `replace`; ditulis supaya siap kalau
+  # nanti pindah ke merge.
+  - name: AIMHeader
+    primary_key: [nomorAIM, nomorPO, IdDC, nomorLPB, IdVendor]
+    write_disposition: replace
