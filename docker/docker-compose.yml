@@ -103,8 +103,14 @@ services:
         # Pool pembatas ingestion. Tanpa ini, 100 task dlt bisa memenuhi
         # seluruh slot dan membuat transform BigQuery antre di belakangnya.
         # `|| true` disengaja: gagal membuat pool tidak boleh menahan
-        # seluruh stack dari start.
-        airflow pools set dlt_ingest 3 "Task ingestion dlt (bronze)" || true
+        # seluruh stack dari start. Gantinya, scripts/deploy.sh memeriksa
+        # bahwa setiap pool yang dipakai task memang ada.
+        #
+        # Harus lewat /entrypoint: container ini jalan sebagai root, sedangkan
+        # airflow terpasang di ~/.local milik user airflow. Tanpa /entrypoint
+        # perintahnya gagal "No module named 'airflow'" -- diam-diam karena
+        # `|| true`, dan task tertahan "non-existent pool" (terjadi di VM).
+        /entrypoint airflow pools set dlt_ingest 3 "Task ingestion dlt (bronze)" || true
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'

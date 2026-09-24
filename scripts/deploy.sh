@@ -272,6 +272,18 @@ for dag_id in sorted(bag.dag_ids):
         print(f">> DAG {dag_id}: 0 task (tidak akan memuat apa pun)")
     else:
         print(f">> DAG {dag_id}: {jumlah} task")
+
+# Task dengan pool yang tidak ada tidak pernah dijadwalkan dan tidak pernah
+# gagal -- run-nya "running" selamanya (terjadi di VM dengan pool dlt_ingest).
+from airflow.models.pool import Pool
+from airflow.utils.session import create_session
+
+dipakai = {t.pool for d in bag.dags.values() for t in d.tasks}
+with create_session() as sesi:
+    ada = {p.pool for p in sesi.query(Pool).all()}
+for pool in sorted(dipakai - ada):
+    masalah += 1
+    print(f">> POOL '{pool}' dipakai task tapi belum ada: task-nya tidak akan pernah jalan")
 sys.exit(1 if masalah else 0)
 PY
 )
