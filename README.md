@@ -85,14 +85,13 @@ git add config/ && git commit -m "Tambah tabel nama_tabel"
 git push
 ```
 
-Di VM:
+Lalu sinkronkan ke VM dari laptop (lihat [Deploy ke VM](#deploy-ke-vm)):
 
 ```bash
-cd /data/airflow/repo && git pull
+scripts/deploy.sh
 ```
 
-Airflow memungut perubahannya sendiri dalam waktu kurang dari satu menit. Tidak
-perlu restart apa pun.
+Airflow memungut perubahannya sendiri. Tidak perlu restart apa pun.
 
 ### Bagaimana memilih setelannya
 
@@ -273,15 +272,18 @@ set `MSSQL_TRUST_SERVER_CERTIFICATE=no` di `.env`.
 
 ## Deploy ke VM
 
-Repo di-clone ke `/data/airflow/repo` dan di-mount ke `/opt/pb-dwh` di dalam
-container. Isi repo-nya langsung dibaca Airflow, jadi deploy = `git pull`.
+Repo di-clone di VM (saat ini `/home/abdul_raffiqurahman/pb-airflow`) dan
+`docker compose` dijalankan dari folder `docker/`-nya. Compose me-mount folder
+induknya — root repo — ke `/opt/pb-dwh` di dalam container, jadi isi repo
+langsung dibaca Airflow dan deploy = `git pull`. Lokasi clone bebas; yang
+penting compose selalu dijalankan dari `<repo>/docker/`.
 
 Pertama kali:
 
 ```bash
-sudo git clone <url-repo> /data/airflow/repo
-sudo chown -R 50000:0 /data/airflow/repo
-cd /opt/pb-dwh/docker    # atau lokasi compose di VM
+git clone git@github.com:rahman-smpb/pb-airflow.git ~/pb-airflow
+cd ~/pb-airflow/docker
+cp .env.example .env      # lalu isi
 docker compose up -d
 ```
 
@@ -306,15 +308,18 @@ Setelah `git pull` di VM, script memvalidasi config di dalam container,
 mem-parse ulang DAG, lalu melaporkan import error dan DAG `RUSAK` bila ada.
 `docker/.env` tidak pernah ikut; isinya diatur langsung di VM.
 
-Rebuild image **hanya** perlu kalau `docker/Dockerfile` atau
-`docker-compose.yml` berubah. Script memberi peringatan kalau itu terjadi; jalankan
-ulang dengan `--rebuild` untuk `docker compose up -d --build`.
+Lokasi repo di VM dicari sendiri dari stack Compose yang sedang jalan, dan git
+dijalankan sebagai pemilik repo supaya SSH key GitHub miliknya yang dipakai.
 
-Tanpa script (langsung di VM):
+Kalau `docker/Dockerfile` atau `docker-compose.yml` ikut berubah, script berhenti
+setelah menarik kode — container yang jalan masih versi lama — dan meminta
+dijalankan ulang dengan `--rebuild` (`docker compose up -d --build`).
+
+Tanpa script (langsung di VM, sebagai pemilik repo):
 
 ```bash
-cd /data/airflow/repo && sudo git -c safe.directory=$PWD pull --ff-only \
-  && sudo chown -R 50000:0 .
+cd ~/pb-airflow && git pull --ff-only
+cd docker && docker compose up -d     # hanya kalau compose/Dockerfile berubah
 ```
 
 ---

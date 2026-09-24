@@ -43,7 +43,7 @@ x-airflow-common: &airflow-common
     # --- Repo pb-dwh ---------------------------------------------------------
     # Repo di-mount utuh, bukan folder dags saja, karena DAG mengimpor
     # `pb_dwh` dari src/ dan membaca YAML dari config/. Deploy kode baru =
-    # `git pull` di /data/airflow/repo, tanpa rebuild image.
+    # `git pull` di repo ini (scripts/deploy.sh), tanpa rebuild image.
     AIRFLOW__CORE__DAGS_FOLDER: /opt/pb-dwh/dags
     PYTHONPATH: /opt/pb-dwh/src
     PB_DWH_CONFIG_DIR: /opt/pb-dwh/config
@@ -60,7 +60,9 @@ x-airflow-common: &airflow-common
 
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
   volumes:
-    - /data/airflow/repo:/opt/pb-dwh
+    # `..` = folder induk docker/, yaitu root repo ini. Relatif supaya repo
+    # boleh di-clone di mana saja di VM (saat ini di home user, bukan /data).
+    - ..:/opt/pb-dwh
     - /data/airflow/logs:/opt/airflow/logs
     - /data/airflow/config:/opt/airflow/config
     - /data/airflow/plugins:/opt/airflow/plugins

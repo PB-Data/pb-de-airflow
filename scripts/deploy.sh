@@ -20,7 +20,7 @@
 #   PB_DWH_VM        (airflow-prod)
 #   PB_DWH_ZONE      (asia-southeast2-c)
 #   PB_DWH_PROJECT   (smi-dwh)
-#   PB_DWH_REPO_DIR  (/data/airflow/repo)
+#   PB_DWH_REPO_DIR  (kosong = dicari dari stack Compose yang sedang jalan)
 #   PB_DWH_VM_USER   (kosong = user default gcloud)
 
 set -euo pipefail
@@ -28,7 +28,7 @@ set -euo pipefail
 VM=${PB_DWH_VM:-airflow-prod}
 ZONE=${PB_DWH_ZONE:-asia-southeast2-c}
 PROJECT=${PB_DWH_PROJECT:-smi-dwh}
-REPO_DIR=${PB_DWH_REPO_DIR:-/data/airflow/repo}
+REPO_DIR=${PB_DWH_REPO_DIR:-}
 VM_USER=${PB_DWH_VM_USER:-}
 
 BRANCH=""
@@ -99,11 +99,13 @@ fi
 say "Cek GitHub: origin/$BRANCH"
 git fetch --quiet origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" 2>/dev/null || true
 
+# Perbandingan dengan branch lokal hanya berarti untuk branch aktif, karena
+# hanya itu yang baru saja dites. Branch lain di-deploy apa adanya dari GitHub.
 AHEAD=0
 BEHIND=0
 if ! git rev-parse --verify --quiet "refs/remotes/origin/$BRANCH" >/dev/null; then
   AHEAD=belum-ada
-elif git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
+elif [ "$BRANCH" = "$CURRENT" ]; then
   read -r BEHIND AHEAD < <(git rev-list --left-right --count "origin/$BRANCH...$BRANCH")
 fi
 
@@ -127,7 +129,7 @@ fi
 [ "$BEHIND" = 0 ] \
   || die "branch lokal ketinggalan $BEHIND commit dari origin/$BRANCH. git pull dulu supaya yang dites sama dengan yang di-deploy."
 
-TARGET=$(git rev-parse --short "$BRANCH" 2>/dev/null || git rev-parse --short "origin/$BRANCH")
+TARGET=$(git rev-parse --short "origin/$BRANCH" 2>/dev/null || git rev-parse --short HEAD)
 echo "Akan di-deploy: $BRANCH @ $TARGET"
 
 # ---------------------------------------------------------------------------
@@ -139,26 +141,55 @@ set -euo pipefail
 say() { printf '\n== [VM] %s\n' "$*"; }
 die() { printf '\nGAGAL [VM]: %s\n' "$*" >&2; exit 1; }
 
-[ -d "$REPO/.git" ] || die "repo tidak ditemukan di $REPO"
-
-# Repo di VM biasanya milik UID 50000 (user airflow di dalam container), yang
-# tidak punya akun di VM. Kalau pemiliknya bukan user SSH ini, git dijalankan
-# sebagai root lalu kepemilikan dikembalikan, supaya container tetap bisa
-# membaca semuanya seperti sebelumnya.
-PEMILIK=$(stat -c %u:%g "$REPO")
-if [ "$(stat -c %u "$REPO")" = "$(id -u)" ]; then
-  g() { git -C "$REPO" "$@"; }
-  pulihkan_pemilik() { :; }
-else
-  g() { sudo -H git -c safe.directory="$REPO" -C "$REPO" "$@"; }
-  pulihkan_pemilik() { sudo chown -R "$PEMILIK" "$REPO"; }
-fi
-# Dipulihkan juga kalau deploy berhenti di tengah jalan.
-trap pulihkan_pemilik EXIT
-
 if docker info >/dev/null 2>&1; then D="docker"; else D="sudo docker"; fi
 
-say "Repo $REPO (pemilik $PEMILIK)"
+# Cari stack Compose yang sedang jalan dan pakai persis itu: salah tebak
+# nama project atau file compose berarti menyalakan stack Airflow kedua.
+# Lokasi repo juga diambil dari sini (compose ada di <repo>/docker/), supaya
+# tidak bergantung pada tempat repo di-clone.
+say "Docker Compose"
+INFO=$($D ps --filter "label=com.docker.compose.service=airflow-scheduler" \
+  --format '{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.project.config_files"}}' \
+  | head -n 1)
+COMPOSE_ARGS=()
+if [ -n "$INFO" ]; then
+  PROJ=${INFO%%|*}
+  SISA=${INFO#*|}
+  WD=${SISA%%|*}
+  CONFIG_FILES=${SISA#*|}
+  COMPOSE_ARGS+=(-p "$PROJ")
+  IFS=, read -r -a DAFTAR_CONFIG <<< "$CONFIG_FILES"
+  for berkas in "${DAFTAR_CONFIG[@]}"; do
+    COMPOSE_ARGS+=(-f "$berkas")
+  done
+  echo "Project '$PROJ', compose: $CONFIG_FILES"
+  REPO=${REPO:-$(dirname "$WD")}
+else
+  [ -n "$REPO" ] || die "stack Airflow tidak sedang jalan, jadi lokasi repo tidak bisa ditebak. Set PB_DWH_REPO_DIR."
+  WD="$REPO/docker"
+  echo "Container airflow-scheduler tidak sedang jalan; memakai $WD."
+fi
+c() { (cd "$WD" && $D compose "${COMPOSE_ARGS[@]}" "$@"); }
+
+[ -d "$REPO/.git" ] || die "repo git tidak ditemukan di $REPO. Set PB_DWH_REPO_DIR ke lokasi repo di VM."
+
+# git dijalankan sebagai pemilik repo: SSH key / kredensial GitHub ada di akun
+# itu, dan git menolak repo milik user lain ("dubious ownership"). Kalau
+# pemiliknya UID tanpa akun di VM (mis. 50000 milik container), git jalan
+# sebagai root dan kepemilikan dikembalikan sesudahnya.
+UID_PEMILIK=$(stat -c %u "$REPO")
+PEMILIK=$(stat -c %u:%g "$REPO")
+NAMA_PEMILIK=$(getent passwd "$UID_PEMILIK" | cut -d: -f1 || true)
+if [ "$UID_PEMILIK" = "$(id -u)" ]; then
+  g() { git -C "$REPO" "$@"; }
+elif [ -n "$NAMA_PEMILIK" ]; then
+  g() { sudo -u "$NAMA_PEMILIK" -H git -C "$REPO" "$@"; }
+else
+  g() { sudo -H git -c safe.directory="$REPO" -C "$REPO" "$@"; }
+  trap 'sudo chown -R "$PEMILIK" "$REPO"' EXIT
+fi
+
+say "Repo $REPO (pemilik ${NAMA_PEMILIK:-$PEMILIK})"
 DIUBAH=$(g status --porcelain --untracked-files=no)
 [ -z "$DIUBAH" ] || die "ada file yang diubah langsung di VM; deploy dibatalkan supaya tidak tertimpa:
 $DIUBAH"
@@ -166,7 +197,7 @@ $DIUBAH"
 LAMA=$(g rev-parse HEAD)
 BRANCH_LAMA=$(g rev-parse --abbrev-ref HEAD)
 g fetch --quiet origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" \
-  || die "VM tidak bisa mengambil $BRANCH dari GitHub. Cek akses repo (deploy key / token) di VM."
+  || die "VM tidak bisa mengambil $BRANCH dari GitHub. Cek akses repo (SSH key / token) milik ${NAMA_PEMILIK:-pemilik repo}."
 if g show-ref --verify --quiet "refs/heads/$BRANCH"; then
   g checkout --quiet "$BRANCH"
 else
@@ -186,36 +217,13 @@ fi
 BERUBAH=$(g diff --name-only "$LAMA" "$BARU")
 BALIK="untuk kembali ke versi sebelumnya: git -C $REPO checkout ${LAMA:0:7}"
 
-# Pakai project Compose yang sedang jalan, bukan menebak dari folder: salah
-# tebak nama project berarti menyalakan stack Airflow kedua.
-say "Docker Compose"
-INFO=$($D ps --filter "label=com.docker.compose.service=airflow-scheduler" \
-  --format '{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.project.config_files"}}' \
-  | head -n 1)
-COMPOSE_ARGS=()
-if [ -n "$INFO" ]; then
-  PROJ=${INFO%%|*}
-  SISA=${INFO#*|}
-  WD=${SISA%%|*}
-  CONFIG_FILES=${SISA#*|}
-  COMPOSE_ARGS+=(-p "$PROJ")
-  IFS=, read -r -a DAFTAR_CONFIG <<< "$CONFIG_FILES"
-  for berkas in "${DAFTAR_CONFIG[@]}"; do
-    COMPOSE_ARGS+=(-f "$berkas")
-  done
-  echo "Project '$PROJ' di $WD ($CONFIG_FILES)"
-else
-  WD="$REPO/docker"
-  echo "Container airflow-scheduler tidak sedang jalan; memakai $WD."
-fi
-c() { (cd "$WD" && $D compose "${COMPOSE_ARGS[@]}" "$@"); }
-
 if [ "$REBUILD" = 1 ]; then
   say "docker compose up -d --build"
   c up -d --build
 elif printf '%s\n' "$BERUBAH" | grep -qxE 'docker/(Dockerfile|docker-compose\.yml)'; then
-  echo "PERHATIAN: docker/Dockerfile atau docker-compose.yml berubah, dan belum berlaku"
-  echo "sampai deploy dijalankan ulang dengan --rebuild."
+  # Container yang jalan masih memakai compose/image lama, jadi validasi di
+  # dalamnya tidak berarti apa-apa. Berhenti di sini dengan instruksi jelas.
+  die "docker/Dockerfile atau docker-compose.yml ikut berubah. Kode sudah ditarik, tapi container masih versi lama. Jalankan ulang: scripts/deploy.sh --rebuild"
 else
   echo "Image dan compose tidak berubah; container tidak perlu di-restart."
 fi
@@ -240,8 +248,8 @@ fi
 REMOTE
 )
 
-# Script dikirim sebagai base64 satu baris: gcloud di Windows lewat cmd.exe,
-# yang memotong argumen multi-baris dan mengacak tanda kutip.
+# Script dikirim sebagai base64 satu baris: gcloud di Windows memotong argumen
+# multi-baris dan mengacak tanda kutip.
 PAYLOAD=$(printf 'BRANCH=%q\nREPO=%q\nREBUILD=%q\n%s\n' "$BRANCH" "$REPO_DIR" "$REBUILD" "$REMOTE")
 B64=$(printf '%s' "$PAYLOAD" | base64 | tr -d '\n')
 CMD="f=\$(mktemp); echo $B64 | base64 -d > \$f; bash \$f; rc=\$?; rm -f \$f; exit \$rc"
@@ -250,6 +258,7 @@ HOST=${VM_USER:+$VM_USER@}$VM
 
 if [ "$DRY_RUN" = 1 ]; then
   say "Dry run"
+  echo "Repo di VM: ${REPO_DIR:-otomatis, dari stack Compose yang sedang jalan}"
   echo "Akan menjalankan: gcloud compute ssh $HOST --zone $ZONE --project $PROJECT --command <script ${#CMD} karakter>"
   echo "VM tidak disentuh."
   exit 0
