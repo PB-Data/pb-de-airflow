@@ -21,3 +21,13 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+
+# Dokumen Office (dokumentasi, spreadsheet kerja). Disimpan di luar repo,
+# mis. rahman/Dokumentasi Silver Layer.xlsx.
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.xlsm
+# File kunci sementara saat dokumen Office sedang dibuka
+~$*

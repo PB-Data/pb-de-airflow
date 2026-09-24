@@ -460,10 +460,21 @@ setelan rotasi file diam-diam tidak berlaku.
 
 **Nama tabel & kolom tidak diubah ke snake_case.** `.dlt/config.toml` memakai
 naming `sql_cs_v1`, jadi `AIMHeader.nomorAIM` di SQL Server tetap
-`AIMHeader.nomorAIM` di BigQuery — sama dengan bronze Datastream lama, sehingga
-query silver yang sudah ada cukup diganti nama dataset-nya. Default dlt
-(`snake_case`) akan menghasilkan `aim_header.nomor_aim`. Mengganti naming
+`AIMHeader.nomorAIM` di BigQuery — sama dengan bronze Datastream lama. Default
+dlt (`snake_case`) akan menghasilkan `aim_header.nomor_aim`. Mengganti naming
 setelah data produksi dimuat berarti membuang dan memuat ulang semua tabel.
+
+**Kolom datetime mendarat sebagai `TIMESTAMP`, bukan `DATETIME`.** dlt 1.30
+selalu menulis `TIMESTAMP` ke BigQuery. Bronze Datastream memakai `DATETIME`,
+jadi query silver lama perlu `DATETIME(kolom)` di kolom waktu. Nilainya jam WIB
+apa adanya berlabel UTC; jangan pakai `DATETIME(kolom, 'Asia/Jakarta')`.
+
+**Dataset dan tabel bronze dibuat manual**, dari file di `sql/ddl/`, sebelum
+DAG-nya jalan pertama kali. SA Airflow hanya punya `bigquery.dataEditor` di
+dataset itu dan `bigquery.jobUser` di project, jadi tidak bisa membuat dataset
+atau menulis ke dataset lain. dlt tetap membuat tiga tabel internalnya sendiri
+(`_dlt_loads`, `_dlt_version`, `_dlt_pipeline_state`), dan akan membuat tabel
+data yang belum ada — jadi jalankan DDL-nya dulu sebelum menambah tabel di YAML.
 
 **Dataset dlt terpisah dari dataset Datastream.** Datastream lama menulis ke
 `pb_bronze_dc_<dc>_dbo`; dlt menulis ke `pb_bronze_dlt_dc_<dc>_dbo`. Tabel

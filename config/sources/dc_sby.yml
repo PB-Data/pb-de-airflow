@@ -15,6 +15,9 @@ source:
   # tabelnya punya kolom `datastream_metadata` dan dibaca view di
   # `pb_original_data_source`. Kalau dlt menulis ke sana, tabelnya ditimpa
   # dengan schema yang berbeda dan view-view itu ikut rusak.
+  #
+  # Dataset & tabelnya dibuat manual: sql/ddl/pb_bronze_dlt_dc_sby_dbo.sql.
+  # Tambah tabel di bawah = tambah CREATE TABLE di file itu juga.
   bq_dataset: pb_bronze_dlt_dc_sby_dbo
 
 tables:
