@@ -40,13 +40,27 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '4'
     AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: '1'
 
-    # --- dlt: working dir extract/normalize di disk data, bukan boot disk ---
+    # --- Repo pb-dwh ---------------------------------------------------------
+    # Repo di-mount utuh, bukan folder dags saja, karena DAG mengimpor
+    # `pb_dwh` dari src/ dan membaca YAML dari config/. Deploy kode baru =
+    # `git pull` di /data/airflow/repo, tanpa rebuild image.
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/pb-dwh/dags
+    PYTHONPATH: /opt/pb-dwh/src
+    PB_DWH_CONFIG_DIR: /opt/pb-dwh/config
+    PB_DWH_SQL_DIR: /opt/pb-dwh/sql
+
+    # --- dlt -----------------------------------------------------------------
+    # Dua hal yang berbeda dan sering tertukar:
+    #   DLT_PROJECT_DIR -> tempat dlt mencari .dlt/config.toml  = repo
+    #   DLT_DATA_DIR    -> tempat dlt menulis file kerja        = disk data
+    # Kalau keduanya disamakan, .dlt/config.toml di repo tidak akan terbaca
+    # dan semua setelan rotasi file di bawah ini diam-diam tidak berlaku.
+    DLT_PROJECT_DIR: /opt/pb-dwh
     DLT_DATA_DIR: /opt/dlt
-    DLT_PROJECT_DIR: /opt/dlt
 
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
   volumes:
-    - /data/airflow/dags:/opt/airflow/dags
+    - /data/airflow/repo:/opt/pb-dwh
     - /data/airflow/logs:/opt/airflow/logs
     - /data/airflow/config:/opt/airflow/config
     - /data/airflow/plugins:/opt/airflow/plugins
@@ -82,8 +96,13 @@ services:
     command:
       - -c
       - |
-        mkdir -p /opt/airflow/{logs,dags,plugins,config} /opt/dlt
+        mkdir -p /opt/airflow/{logs,plugins,config} /opt/dlt
         /entrypoint airflow version
+        # Pool pembatas ingestion. Tanpa ini, 100 task dlt bisa memenuhi
+        # seluruh slot dan membuat transform BigQuery antre di belakangnya.
+        # `|| true` disengaja: gagal membuat pool tidak boleh menahan
+        # seluruh stack dari start.
+        airflow pools set dlt_ingest 3 "Task ingestion dlt (bronze)" || true
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'
