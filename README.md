@@ -1,555 +1,317 @@
-# pb-dwh — Ingestion SQL Server ke BigQuery
+# Airflow Medallion Framework: SQL Server → GCS → BigQuery
 
-Pipeline harian yang menarik data dari Cloud SQL for SQL Server ke BigQuery
-layer bronze, lalu mentransformasinya ke silver.
+Framework ingestion dan transformasi berbasis config untuk **Airflow 3** (Docker Compose di VM):
 
-Alur datanya:
+- **Bronze**: tabel Cloud SQL (SQL Server) di-extract pakai **dlt**, disimpan sebagai file **parquet / jsonl.gz di GCS** (data lake, file lama tetap disimpan), lalu di-load ke **BigQuery** dalam satu pipeline.
+- **Silver / Gold**: file SQL biasa yang dijalankan `BigQueryInsertJobOperator`, dengan macro `ref()` / `source()` ala dbt. Dependency terbaca otomatis dan nanti tinggal pindah ke dbt.
+- **Nambah tabel cukup edit YAML.** Python-nya tidak perlu disentuh.
 
-```
-             task <tabel>.ke_gcs                         task <tabel>.ke_bq
-SQL Server --(dlt, PyArrow)--> Parquet di GCS (raw) --(BigQuery load job)--> bronze
-                               semua run disimpan,                             |
-                               per folder tanggal          (BigQueryInsertJobOperator)
-                                                                               v
-                                                                             silver
-```
-
-Setiap tabel dua task: `ke_gcs` menulis Parquet ke
-`gs://<GCS_STAGING_BUCKET>/<source>/<tabel>/<tanggal>/`, lalu `ke_bq` memuat
-tepat file-file run itu ke tabel bronze. Kalau load ke BigQuery gagal, cukup
-ulang `ke_bq` — SQL Server tidak dibaca ulang.
-
-Dijadwalkan oleh Apache Airflow 3.1.6 yang berjalan di VM GCP dengan Docker
-Compose.
-
-**Prinsip utama: menambah tabel tidak perlu menyentuh kode Python.** Semua
-diatur dari file YAML di `config/sources/`.
+> Divalidasi dengan **Airflow 3.3.2 & 3.1.8** (end-to-end) dan **3.0.6** (import DAG), **dlt 1.30.0**, provider google 22.x dan standard 1.19. Detail yang sudah dan belum dites ada di [Status verifikasi](#status-verifikasi).
 
 ---
 
-## Daftar isi
+## Arsitektur
 
-- [Struktur project](#struktur-project)
-- [Menambah tabel baru](#menambah-tabel-baru)
-- [Pilihan setelan tabel](#pilihan-setelan-tabel)
-- [Menjalankan di laptop untuk testing](#menjalankan-di-laptop-untuk-testing)
-- [Setup ODBC Driver 18](#setup-odbc-driver-18)
-- [Deploy ke VM](#deploy-ke-vm)
-- [Menambah transform silver](#menambah-transform-silver)
-- [Troubleshoot](#troubleshoot)
-- [Catatan teknis](#catatan-teknis)
+```mermaid
+flowchart LR
+  subgraph SRC["Project Cloud SQL"]
+    MSSQL[("SQL Server<br/>public IP + authorized network<br/>login read-only")]
+  end
+  subgraph VM["VM Compute Engine: Airflow 3 (Docker Compose)"]
+    direction TB
+    B["DAG bronze__&lt;source&gt;<br/>1 task per tabel<br/>ExternalPythonOperator → /opt/dlt-venv"]
+    T["DAG transform__&lt;domain&gt;<br/>BigQueryInsertJobOperator"]
+    B -- "Asset event<br/>bigquery://…/tabel" --> T
+  end
+  subgraph DWH["Project smi-dwh (asia-southeast2)"]
+    GCS[("GCS data lake<br/>&lt;dataset&gt;/&lt;tabel&gt;/YYYY/MM/DD/*.parquet")]
+    BR[("BigQuery bronze_*<br/>append-only, partisi _ingested_at")]
+    SV[("silver_*<br/>dedup / clean")]
+    GD[("gold_*<br/>agregat")]
+  end
+  MSSQL -- "dlt sql_table (pyarrow)<br/>incremental + lookback" --> GCS
+  GCS -- "BigQuery load job" --> BR
+  BR --> SV --> GD
+  T -. "SQL" .-> SV
+```
+
+| Layer | Isi | Cara tulis | Pola default |
+|---|---|---|---|
+| Lake (GCS) | File mentah per load (`parquet` / `jsonl.gz`) | otomatis (dlt staging) | disimpan permanen (`keep_files: true`) |
+| Bronze (BQ) | Salinan sumber + `_ingested_at`, `_dlt_load_id` | YAML `configs/sources/*.yml` | incremental = **append** (ada duplikat dari lookback), full = **replace** |
+| Silver (BQ) | Versi terbaru per PK, tipe & nama rapi | `sql/silver/**.sql` | incremental MERGE dari load bronze sejak progres terakhir tabel silver (− lookback) |
+| Gold (BQ) | Agregat / mart | `sql/gold/**.sql` | hitung ulang partisi tanggal yang berubah sejak build terakhir |
+
+### Kenapa dlt (dan jebakannya)
+
+dlt cocok untuk kasus ini: `sql_table` (reflection skema, incremental, arrow) + `destination=bigquery` + `staging=filesystem(GCS)` sudah pas dengan alur DB → GCS → BQ. Framework ini juga menangani beberapa jebakan yang **sudah dicek langsung di source dlt 1.30**:
+
+1. **File di GCS dihapus secara default.** dlt menghapus file staging lama per tabel sebelum load (`truncate_tables_on_staging_destination_before_load=True`), bahkan untuk append. Supaya GCS benar-benar jadi data lake, framework ini mematikannya (`lake.keep_files: true`). Ada test-nya di `tests/test_lake_retention.py`.
+2. **Timezone.** `datetime` SQL Server (jam dinding WIB tanpa timezone) disimpan dlt sebagai `TIMESTAMP` BigQuery, yang dibaca sebagai UTC. Di silver pakai `as_local_datetime()` atau `as_utc_timestamp()` (lihat [Macro SQL](#macro-sql)).
+3. **Nama kolom cluster.** Hint `CLUSTER BY` table-level di dlt tidak ikut dinormalisasi (`CustomerID` ≠ `customer_id`), jadi `CREATE TABLE` akan gagal. Framework ini otomatis mengirim nama snake_case.
+4. **State incremental.** Tiap tabel pakai 1 pipeline dlt (state & schema terpisah), jadi aman jalan paralel. `max_active_tis_per_dag=1` per task mencegah 2 run (termasuk backfill) memakai state tabel yang sama.
+5. **Konflik dependency dengan Airflow.** dlt dipasang di venv terpisah (`/opt/dlt-venv`) lalu dipanggil lewat `ExternalPythonOperator`.
+6. **Paket load yang gagal.** Kalau run sebelumnya gagal setelah extract, `pipeline.run(data)` dlt hanya me-load paket lama lalu berhenti *tanpa* extract data baru. Runner menyelesaikan paket lama dulu, baru extract.
 
 ---
 
-## Struktur project
+## Struktur repo
 
 ```
-config/
-  settings.yml              default global untuk semua source
-  sources/*.yml             satu file = satu database = satu DAG   <-- SERING DIEDIT
-  examples/erp_mssql.yml    contoh semua pola setelan; TIDAK dibaca Airflow
-sql/
-  silver/*.sql              query transform, satu file = satu task <-- SERING DIEDIT
-  ddl/<bq_dataset>.sql      dataset & tabel bronze, dijalankan manual di BigQuery
-dags/
-  bronze_ingest.py          baca config, bikin DAG
-  _factory.py               isi DAG-nya
-  silver_transform.py       DAG transform
-src/pb_dwh/
-  config/                   baca & validasi YAML
-  sources/mssql.py          bangun dlt source dari config
-  sources/types.py          penyesuaian tipe SQL Server
-  state/incremental.py      cursor & lookback
-  sinks/gcs.py              tahap 1: dlt -> Parquet di GCS (raw)
-  sinks/bigquery.py         tahap 2: load job GCS -> tabel bronze
-  bronze/runner.py          perekat; dipakai DAG maupun CLI
-  cli.py                    perkakas testing lokal
-docker/                     Dockerfile, compose, contoh .env
-tests/                      test config, tanpa perlu DB
-.dlt/config.toml            setelan memori & rotasi file dlt
+.
+├── dags/                              ← SELURUH isi folder ini di-sync ke <compose>/dags di VM
+│   ├── bronze__sqlserver_main.py      ← 1 file kecil per source (isolasi error)
+│   ├── transform__sales.py            ← 1 file kecil per domain transform
+│   ├── .airflowignore
+│   ├── configs/
+│   │   ├── platform.yml               ← project BQ, region, bucket lake, timezone
+│   │   ├── sources/sqlserver_main.yml ← daftar tabel bronze
+│   │   └── transforms/sales.yml       ← daftar model silver/gold
+│   ├── sql/{silver,gold}/<domain>/*.sql
+│   └── medallion/                     ← framework (tidak perlu diubah untuk kerja harian)
+│       ├── config.py  catalog.py  validate.py
+│       ├── bronze/    runner.py cli.py connections.py adapters.py   (jalan di venv dlt)
+│       └── factory/   bronze_factory.py transform_factory.py        (jalan di Airflow)
+├── docker/     Dockerfile, requirements-dlt.txt (lock), docker-compose.override.yaml, env.example
+├── infra/      gcp_setup.sh (IAM lintas project, bucket, IP statis, authorized network), SQL login read-only
+├── scripts/    deploy.sh / deploy.ps1 (sync manual laptop → VM), remote_install.sh
+└── tests/      pytest: config, window incremental, e2e dlt, retensi lake, import DAG
 ```
-
-Yang sehari-hari diedit hanya dua baris pertama. Sisanya jarang berubah.
 
 ---
 
-## Menambah tabel baru
+## Setup (sekali)
 
-Dua langkah, dua file:
+### 1. GCP & IAM lintas project
 
-1. **Tabel bronze-nya dulu.** Tambahkan `CREATE TABLE` di
-   `sql/ddl/<bq_dataset>.sql` dan jalankan di BigQuery. Tabel tidak dibuat
-   otomatis; task `ke_bq` gagal kalau tabelnya belum ada. Aturan tipe kolomnya
-   ada di kepala file DDL itu.
-2. **Lalu config-nya.** Buka file source yang sesuai di `config/sources/`, lalu
-   tambahkan satu entri di bawah `tables:`.
+Edit variabel di atas `infra/gcp_setup.sh`, lalu jalankan (misalnya di Cloud Shell) oleh admin yang punya akses ke ketiga project:
+
+```bash
+bash infra/gcp_setup.sh
+```
+
+Yang dilakukan / dicek:
+
+| Item | Nilai |
+|---|---|
+| SA VM → project `smi-dwh` | `roles/bigquery.jobUser`, `roles/bigquery.dataEditor` |
+| SA VM → bucket lake | `roles/storage.objectAdmin` |
+| Access scope VM | **harus `cloud-platform`**. Default scope Compute Engine tidak mencakup BigQuery (hasilnya 403 walaupun IAM sudah benar). Mengubah scope butuh VM di-stop. |
+| Bucket lake | `gs://smi-dwh-datalake`, region **asia-southeast2** (wajib satu region dengan dataset BQ) |
+| IP publik VM | di-promote jadi **statis**. Kalau IP ephemeral berubah setelah VM restart, whitelist di Cloud SQL tidak berlaku lagi. |
+| Cloud SQL | IP VM `/32` ditambahkan ke authorized networks (list lama tetap dipertahankan) |
+
+> Kalau VM keluar lewat Cloud NAT (tanpa IP publik), yang didaftarkan adalah IP NAT-nya.
+
+### 2. Login read-only di SQL Server
+
+Jalankan `infra/sqlserver_readonly_login.sql` sebagai admin (`sqlserver`) untuk membuat login `dlt_reader` dengan role `db_datareader`. Pastikan kolom cursor (mis. `ModifiedDate`) punya index.
+
+### 3. Isi config
+
+- `dags/configs/platform.yml`: `bq_project`, `bq_location`, `lake.bucket_url`.
+- `dags/configs/sources/sqlserver_main.yml`: tabel-tabel yang di-ingest (contoh di file itu masih dummy, ganti dengan tabel asli).
+
+### 4. Siapkan docker-compose di VM
+
+Di folder `docker-compose.yaml` Airflow:
+
+- Copy `docker/docker-compose.override.yaml` ke folder ini (otomatis di-merge oleh `docker compose`).
+- Tambahkan isi `docker/env.example` ke `.env`: `AIRFLOW_IMAGE_NAME=smi-airflow:3.1.6-dlt` dan `AIRFLOW_FERNET_KEY`.
+- `mkdir -p dlt_data` (pakai user yang sama dengan pemilik `dags/`), lalu `sudo apt-get install -y rsync` kalau belum ada.
+- `ARG AIRFLOW_IMAGE` di `docker/Dockerfile` **harus sama dengan versi Airflow yang sekarang jalan** (cek dengan `docker compose exec airflow-scheduler airflow version`).
+
+### 5. Deploy pertama (build image + sync DAG)
+
+```bash
+cp scripts/deploy.env.example scripts/deploy.env   # isi VM_NAME, VM_ZONE, VM_PROJECT, REMOTE_DIR
+./scripts/deploy.sh --image    # WAJIB --image untuk deploy pertama (image custom belum ada)
+./scripts/deploy.sh            # deploy berikutnya: sync dags/ saja
+# Windows PowerShell: .\scripts\deploy.ps1 -Image   /   .\scripts\deploy.ps1
+```
+
+Urutan kerja script deploy:
+
+1. Validasi lokal (`python -m medallion.validate`: YAML, `ref()`/`source()`, render & syntax SQL).
+2. Upload ke VM lewat `gcloud compute scp`.
+3. (`--image`) Build image di VM, termasuk ODBC Driver 18 dan venv dlt.
+4. Validasi **lagi di container sekali-pakai** (import DAG pakai Airflow asli). Kalau gagal, folder `dags/` yang sedang dipakai Airflow **tidak disentuh**.
+5. `rsync --delete` ke `dags/` (update in-place, karena bind mount tidak ikut pindah kalau folder diganti), lalu `docker compose up -d` (`--image`).
+
+Butuh `gcloud` di laptop dan `rsync` di VM. Mau build manual di VM: `docker build -t smi-airflow:3.1.6-dlt -f docker/Dockerfile docker/`.
+
+### 6. Airflow Connection ke SQL Server
+
+Buat **setelah** langkah 5 (container sudah jalan dengan `AIRFLOW_FERNET_KEY`, jadi password tersimpan terenkripsi). Bisa lewat UI (Admin → Connections, type **Generic**) atau CLI:
+
+```bash
+docker compose exec airflow-apiserver airflow connections add mssql_sqlserver_main \
+  --conn-type generic \
+  --conn-host <IP-public-Cloud-SQL> --conn-port 1433 \
+  --conn-login dlt_reader --conn-password '<password>' \
+  --conn-schema <NamaDatabase> \
+  --conn-extra '{"Encrypt": "yes", "TrustServerCertificate": "yes"}'
+```
+
+- `schema` = nama database. Isi `extra` diteruskan sebagai atribut ODBC (driver default `ODBC Driver 18 for SQL Server`).
+- Koneksi lewat public IP **selalu terenkripsi** (`Encrypt=yes`). `TrustServerCertificate=yes` diperlukan karena sertifikat Cloud SQL ditandatangani CA per-instance, bukan CA publik. Untuk hardening: pasang `server-ca.pem` di image lalu set `no`, atau pakai Cloud SQL Auth Proxy.
+- `google_cloud_default` sudah di-set otomatis oleh override compose (pakai SA VM, project `smi-dwh`).
+- Password di-mask di log dan di tab *Rendered Template*.
+
+Tes koneksi dari VM: `nc -vz <IP-public-Cloud-SQL> 1433`.
+
+### 7. Run pertama
+
+1. Set `initial_value` tiap tabel incremental. Run pertama akan mengambil data sejak tanggal ini.
+2. Untuk tabel besar, set `initial_value` ke tanggal yang dekat (mis. awal bulan ini), lalu isi histori sebelum tanggal itu dengan **backfill** per potongan waktu (lihat [Backfill](#backfill)). Backfill tidak mengubah state incremental.
+3. Unpause **`bronze__sqlserver_main` dan `transform__sales`** (compose resmi mem-pause DAG baru). `transform__sales` otomatis jalan setelah semua tabel bronze yang dipakainya ter-update.
+
+---
+
+## Kerja harian
+
+### Tambah tabel (cukup YAML)
 
 ```yaml
-  - name: nama_tabel_di_sql_server
-    primary_key: [kolom_id]
-    write_disposition: replace
+# dags/configs/sources/sqlserver_main.yml -> tables:
+  - table: dbo.SaldoStok             # schema.tabel di SQL Server
+    load: incremental                # incremental | full
+    cursor: ModifiedDate             # kolom updated/modified (sebaiknya ter-index)
+    primary_key: [KodeToko, KodeProduk]
+    lookback_hours: 72               # baca ulang 72 jam terakhir dari last_value (data telat)
 ```
 
-Lalu periksa dan deploy:
+Opsi lain per tabel: `write_disposition` (append/replace/merge), `initial_value`, `target_table`, `cluster_by`, `partition_by`, `included_columns` / `excluded_columns`, `chunk_size`, `backend`, `timeout_minutes`, `on_cursor_null` (raise/include/exclude), `enabled`. Typo key langsung ketahuan, contohnya: `key tidak dikenal: 'primay_key' (maksudnya 'primary_key'?)`.
 
-```bash
-python -m pb_dwh.cli validate          # pastikan config sah
-git add config/ sql/ddl/ && git commit -m "Tambah tabel nama_tabel"
-git push
-```
+Nama di BigQuery otomatis snake_case: `dbo.SalesOrderHeader` → `bronze_sqlserver_main.dbo__sales_order_header`, kolom `CustomerID` → `customer_id`.
 
-Lalu sinkronkan ke VM dari laptop (lihat [Deploy ke VM](#deploy-ke-vm)):
+### Tambah source baru
 
-```bash
-scripts/deploy.sh
-```
+1. `dags/configs/sources/<nama>.yml` (field `name` harus sama dengan nama file).
+2. Copy `dags/bronze__sqlserver_main.py` jadi `dags/bronze__<nama>.py`, lalu ganti baris terakhir jadi `dag = build_bronze_dag("<nama>")`. Docstring-nya jangan dihapus: kata `airflow` dan `dag` wajib ada di file supaya diparse Airflow.
+3. Airflow Connection sesuai `airflow_conn_id`. Source Postgres: `type: postgres` (driver psycopg2 sudah ada di image).
 
-Airflow memungut perubahannya sendiri. Tidak perlu restart apa pun.
+`validate` akan protes kalau file `.py`-nya lupa dibuat.
 
-### Bagaimana memilih setelannya
+### Tambah model silver / gold
 
-| Kondisi tabel di SQL Server | Setelan yang dipakai |
+1. Buat `dags/sql/silver/<domain>/<nama>.sql`. Nama file = nama tabel. Copy salah satu pola:
+   - `silver/sales/customer.sql`: **incremental MERGE** + dedup (tabel bronze incremental)
+   - `silver/sales/product.sql`: **full rebuild** (tabel bronze full)
+   - `gold/sales/daily_sales.sql`: **ganti partisi tanggal** yang datanya berubah sejak build terakhir
+2. Daftarkan di `dags/configs/transforms/<domain>.yml` → `models:`.
+3. Preview SQL hasil render (bisa langsung di-paste ke BigQuery console):
+   ```bash
+   cd dags && python -c "from medallion.catalog import *; print(render_model_sql(Catalog.load(), 'silver.customer'))"
+   ```
+
+#### Macro SQL
+
+| Macro | Hasil |
 |---|---|
-| Kecil (< 100 ribu baris) dan barisnya bisa dihapus | `write_disposition: replace`, tanpa cursor |
-| Tidak ada kolom waktu maupun id urut | `write_disposition: replace`, tanpa cursor |
-| Hanya bertambah, tidak pernah di-update (log, transaksi) | `write_disposition: append` + `cursor: <kolom_id>` + `cursor_type: integer`, **tanpa** lookback |
-| Ada kolom waktu yang ikut berubah saat baris di-update | `merge` + `cursor` + `lookback_days` — **belum didukung**, pakai `replace` dulu |
+| `{{ this }}` | tabel model ini, mis. `` `smi-dwh.silver_sales.customer` `` (`this.project/.dataset/.table` juga ada) |
+| `{{ ref('silver.customer') }}` | tabel model lain, sekaligus jadi dependency task |
+| `{{ source('sqlserver_main', 'dbo.Customer') }}` | tabel bronze, sekaligus pemicu DAG (Asset) |
+| `{{ as_local_datetime('modified_date') }}` | `DATETIME(modified_date, 'UTC')` → jam dinding WIB |
+| `{{ as_utc_timestamp('modified_date') }}` | `TIMESTAMP(DATETIME(modified_date,'UTC'), 'Asia/Jakarta')` → instant yang benar |
+| `{{ params.full_refresh }}` / `{{ params.lookback_days }}` | param DAG (bisa diisi saat trigger manual) |
+| `{{ tz }}` | `Asia/Jakarta` |
 
-Kalau ragu, mulai dari `replace`. Itu selalu benar, hanya lebih boros.
+Hindari `{{ ds }}` / `{{ logical_date }}`: di Airflow 3, run yang dipicu asset tidak punya logical date.
 
-`merge` (upsert berdasarkan `primary_key`) sah di config tapi belum didukung
-alur GCS → BigQuery: config yang memakainya ditolak `cli validate` dan
-DAG-nya muncul sebagai `RUSAK`. MERGE akan ditulis di task `ke_bq` saat tabel
-incremental pertama benar-benar dibutuhkan.
+Kalau menambah kolom di model incremental, trigger DAG dengan `full_refresh = true` sekali, karena `INSERT ROW` butuh skema yang sama.
 
-### Kenapa butuh `lookback_days`
+### Backfill
 
-Jam di server aplikasi dan jam di database tidak selalu sama persis, dan ada
-transaksi yang commit-nya telat beberapa detik setelah `modified_at` diisi.
-Kalau kita hanya mengambil baris yang lebih baru dari nilai terakhir, baris
-seperti itu terlewat selamanya tanpa ada error apa pun.
-
-`lookback_days: 2` membuat pipeline selalu mundur 2 hari. Baris yang sama
-memang terambil berulang kali — dan itu tidak masalah, karena
-`write_disposition: merge` dengan `primary_key` akan menimpanya, bukan
-menduplikasinya. Karena itu lookback hanya berguna bersama `merge` (belum
-didukung, lihat di atas); `append` + lookback ditolak karena menghasilkan
-duplikat.
-
----
-
-## Pilihan setelan tabel
-
-| Kunci | Wajib? | Arti |
-|---|---|---|
-| `name` | ya | Nama tabel di SQL Server |
-| `primary_key` | ya kalau `merge` | Kolom kunci. Boleh satu (`id`) atau gabungan (`[a, b]`) |
-| `cursor` | tidak | Kolom penanda perubahan |
-| `cursor_type` | tidak | `datetime` (default) atau `integer` |
-| `lookback_days` | tidak | Mundur berapa hari; hanya untuk `cursor_type: datetime` |
-| `lookback` | tidak | Mundur berapa nilai cursor; hanya untuk `cursor_type: integer` |
-| `initial_value` | tidak | Titik mulai saat run pertama. Berguna agar tidak menarik data 10 tahun ke belakang |
-| `write_disposition` | tidak | `replace` (default) atau `append`. `merge` belum didukung alur GCS → BigQuery |
-| `exclude_columns` | tidak | Kolom yang tidak ikut, mis. `varbinary(max)` |
-| `column_overrides` | tidak | Paksa tipe kolom tertentu |
-| `chunk_size` | tidak | Baris per batch; kecilkan untuk tabel sangat lebar |
-| `reflection_level` | tidak | `minimal` (default), `full`, `full_with_precision` |
-
-Setelan di blok `source:` (sekali per file):
-
-| Kunci | Wajib? | Arti |
-|---|---|---|
-| `name` | ya | Nama source; jadi `dag_id` `bronze_ingest_<name>` |
-| `env_prefix` | ya | Awalan env var kredensial, mis. `MSSQL` → `MSSQL_HOST`, `MSSQL_USER`, ... |
-| `database` | tidak | Nama database di SQL Server. Kalau kosong dibaca dari `<env_prefix>_DATABASE` |
-| `schema` | ya | Schema SQL Server, mis. `dbo` |
-| `bq_dataset` | ya | Dataset tujuan di BigQuery |
-| `schedule`, `start_date`, `pool`, `task_timeout_hours`, `retries` | tidak | Menimpa blok `airflow:` di `settings.yml` |
-
-Database yang berada di instance Cloud SQL yang sama (host & login sama) cukup
-memakai `env_prefix: MSSQL` dan hanya berbeda di `database`. Menambah DC seperti
-itu cukup menyalin `config/sources/dc_sby.yml` — tidak perlu env var baru. DC
-di instance lain butuh `env_prefix` sendiri, mis. `MSSQL_JKT` → `MSSQL_JKT_HOST`.
-
-Config divalidasi sebelum dipakai. Kombinasi yang berbahaya ditolak dengan
-pesan yang menyebut nama file dan tabelnya, misalnya `merge` tanpa
-`primary_key` — yang kalau dibiarkan akan menumpuk duplikat setiap hari tanpa
-satu pun pesan error.
-
----
-
-## Menjalankan di laptop untuk testing
-
-### Sekali saja: siapkan environment
-
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements-dev.txt
-```
-
-Butuh Python 3.10 atau lebih baru, plus ODBC Driver 18 (lihat bagian
-berikutnya).
-
-### Sekali saja: kredensial
-
-```bash
-cp docker/.env.example .env.local
-# isi MSSQL_*, GCP_PROJECT_ID, GCS_STAGING_BUCKET, BQ_*
-
-gcloud auth application-default login    # untuk akses BigQuery & GCS
-```
-
-Muat isinya ke shell:
-
-```bash
-set -a && source .env.local && set +a
-```
-
-### Perintah sehari-hari
-
-```bash
-# 1. Periksa semua config (tidak menyentuh database sama sekali)
-python -m pb_dwh.cli validate
-
-# 2. Lihat daftar tabel beserta setelannya
-python -m pb_dwh.cli list --source dc_sby
-
-# 3. Uji koneksi ODBC dan cek semua tabel di config memang ada
-python -m pb_dwh.cli check-connection --source dc_sby
-
-# 4. Jalankan SATU tabel ke dataset percobaan
-python -m pb_dwh.cli run --source dc_sby --table AIMHeader --dev
-
-# 5. Jalankan semua tabel (hati-hati, ini berat)
-python -m pb_dwh.cli run --source dc_sby --dev
-```
-
-**Selalu pakai `--dev` saat testing.** Tanpa flag itu, data ditulis ke dataset
-bronze yang asli. Dengan `--dev`, dlt menambahkan sufiks pada nama dataset
-sehingga percobaan tidak menimpa apa pun.
-
-Jalankan test:
-
-```bash
-pytest
-```
-
-Test hanya memeriksa pembacaan dan validasi config, jadi cepat dan tidak butuh
-database.
-
----
-
-## Setup ODBC Driver 18
-
-### Di VM (sudah otomatis)
-
-Sudah terpasang di dalam image lewat `docker/Dockerfile`. Build akan berhenti
-kalau drivernya tidak terdaftar, jadi tidak bisa lolos diam-diam.
-
-### Di laptop Windows
-
-Unduh dan pasang **Microsoft ODBC Driver 18 for SQL Server** dari situs
-Microsoft. Verifikasi:
-
-```powershell
-Get-OdbcDriver -Name "ODBC Driver 18*"
-```
-
-### Di laptop macOS
-
-```bash
-brew tap microsoft/mssql-release https://github.com/Microsoft/homebrew-mssql-release
-brew install msodbcsql18
-```
-
-### Di laptop Linux (Debian/Ubuntu)
-
-```bash
-curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-  | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc > /dev/null
-curl -fsSL https://packages.microsoft.com/config/debian/12/prod.list \
-  | sudo tee /etc/apt/sources.list.d/mssql-release.list
-sudo apt-get update
-sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
-```
-
-Verifikasi di mana pun:
-
-```bash
-odbcinst -q -d -n "ODBC Driver 18 for SQL Server"
-```
-
-### Catatan enkripsi
-
-Driver 18 memaksa `Encrypt=yes` secara default, dan sertifikat Cloud SQL tidak
-ada di trust store container. Karena itu koneksi memakai
-`TrustServerCertificate=yes`. Kalau nanti CA Cloud SQL dipasang ke container,
-set `MSSQL_TRUST_SERVER_CERTIFICATE=no` di `.env`.
-
----
-
-## Deploy ke VM
-
-Repo di-clone di VM (saat ini `/home/abdul_raffiqurahman/pb-airflow`) dan
-`docker compose` dijalankan dari folder `docker/`-nya. Compose me-mount folder
-induknya — root repo — ke `/opt/pb-dwh` di dalam container, jadi isi repo
-langsung dibaca Airflow dan deploy = `git pull`. Lokasi clone bebas; yang
-penting compose selalu dijalankan dari `<repo>/docker/`.
-
-Pertama kali:
-
-```bash
-git clone git@github.com:rahman-smpb/pb-airflow.git ~/pb-airflow
-cd ~/pb-airflow/docker
-cp .env.example .env      # lalu isi
-docker compose up -d
-```
-
-Selanjutnya, untuk setiap perubahan config, SQL, atau kode Python, jalankan
-dari laptop (Git Bash di Windows, atau terminal biasa di macOS/Linux):
-
-```bash
-scripts/deploy.sh --dry-run   # cek saja: working tree bersih, test lolos, sudah di-push
-scripts/deploy.sh             # deploy branch aktif ke VM
-scripts/deploy.sh --push      # git push dulu, lalu deploy
-```
-
-Yang dikirim ke VM hanya commit yang sudah ada di GitHub; VM menarik sendiri
-lewat git. Script menolak kalau:
-
-- ada perubahan lokal yang belum di-commit, atau commit yang belum di-push;
-- pytest atau `cli validate` gagal (kalau `.venv` ada);
-- ada file yang diubah langsung di VM — supaya tidak tertimpa diam-diam;
-- branch di VM punya commit yang tidak ada di GitHub.
-
-Setelah `git pull` di VM, script memvalidasi config di dalam container,
-mem-parse ulang DAG, lalu melaporkan import error dan DAG `RUSAK` bila ada.
-`docker/.env` tidak pernah ikut; isinya diatur langsung di VM.
-
-Lokasi repo di VM dicari sendiri dari stack Compose yang sedang jalan, dan git
-dijalankan sebagai pemilik repo supaya SSH key GitHub miliknya yang dipakai.
-
-Kalau `docker/Dockerfile` atau `docker-compose.yml` ikut berubah, script berhenti
-setelah menarik kode — container yang jalan masih versi lama — dan meminta
-dijalankan ulang dengan `--rebuild` (`docker compose up -d --build`).
-
-Tanpa script (langsung di VM, sebagai pemilik repo):
-
-```bash
-cd ~/pb-airflow && git pull --ff-only
-cd docker && docker compose up -d     # hanya kalau compose/Dockerfile berubah
-```
-
----
-
-## Menambah transform silver
-
-Buat file baru di `sql/silver/`, diberi awalan angka untuk menentukan urutan:
-
-```
-sql/silver/10_dim_product.sql
-sql/silver/20_fct_sales_order.sql
-```
-
-Satu file menjadi satu task, dijalankan berurutan sesuai nama file. Tidak ada
-kode Python yang perlu diubah.
-
-Variabel yang tersedia di dalam file SQL:
-
-| Variabel | Isi |
+| Cara | Kapan |
 |---|---|
-| `{{ params.project }}` | `GCP_PROJECT_ID` |
-| `{{ params.bronze }}` | `BQ_DATASET_BRONZE` |
-| `{{ params.silver }}` | `BQ_DATASET_SILVER` |
-| `{{ ds }}` | Tanggal logical date, `YYYY-MM-DD` |
+| **UI → Trigger DAG** `bronze__…`, isi `backfill_start` + `backfill_end` (tanggal **inklusif**, jam WIB) dan `tables` (opsional) | reload rentang tanggal, 1 run. **Cara yang disarankan.** |
+| CLI dlt: `python -m medallion.bronze.cli run sqlserver_main dbo.SalesOrderHeader --start 2025-01-01 --end 2025-06-30` | histori besar, dari laptop / VM |
+| `airflow backfill create --dag-id bronze__sqlserver_main --from-date 2025-12-31 --to-date 2026-01-31 --max-active-runs 1` | 1 run per interval jadwal |
 
-Lihat `sql/silver/10_contoh_dim_product.sql` sebagai template. **File itu masih
-contoh** dan perlu diganti dengan query yang sebenarnya.
+Catatan untuk `airflow backfill create`: tiap run mencakup interval jadwal **01:00–01:00 WIB** (bukan per hari kalender), dan `--from-date` dibaca dalam UTC lalu dibulatkan ke jadwal berikutnya. Jadi mulai **satu hari lebih awal** dari tanggal yang dibutuhkan.
+
+Semua mode backfill:
+
+- hanya **menambah** baris ke bronze (append), **tidak mengubah state incremental**, dan tabel `load: full` otomatis di-skip;
+- maksimal 1 instance per tabel di semua run (`max_active_tis_per_dag=1`), jadi backfill tidak bentrok dengan run terjadwal;
+- aman untuk silver: MERGE punya guard `S.modified_at >= T.modified_at`, jadi versi lama tidak menimpa versi baru.
+
+### Test lokal (tanpa GCP)
+
+```bash
+python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+cd dags && python -m medallion.validate                                   # config + SQL
+python -m medallion.bronze.cli list
+python -m medallion.bronze.cli run sqlserver_main dbo.Customer --target local    # parquet ke .local/lake
+python -m medallion.bronze.cli run sqlserver_main dbo.Customer --target duckdb   # tabel di .local/bronze.duckdb
+cd .. && pytest
+```
+
+Kredensial untuk CLI ada di `~/.dlt/secrets.toml` (jangan di repo):
+
+```toml
+[sources.sqlserver_main.credentials]
+host = "34.101.xx.xx"
+port = 1433
+login = "dlt_reader"
+password = "..."
+database = "NamaDatabase"
+```
+
+Catatan: `--target local` pakai filesystem sebagai destination, jadi tabel `full` di lokal hanya menyimpan snapshot terakhir. Di production (staging GCS + `keep_files: true`) semua snapshot tetap ada. Target lokal punya state terpisah dari production.
+
+Reset satu tabel (drop tabel bronze + state, lalu load ulang dari `initial_value`; file di lake GCS **tidak** ikut terhapus):
+`python -m medallion.bronze.cli run sqlserver_main dbo.Customer --refresh drop_resources`
 
 ---
 
-## Troubleshoot
+## Perilaku penting
 
-### Semua log dlt muncul sebagai ERROR di UI Airflow
+- **Hard delete di sumber tidak ter-capture** oleh incremental cursor. Tabel yang butuh delete: pakai `load: full`, atau CDC (Datastream yang sudah ada), atau rekonsiliasi PK berkala.
+- **Kolom baru di sumber** otomatis ditambahkan ke bronze (schema evolution dlt). Semua kolom bronze dibuat NULLABLE supaya load tidak gagal kalau sumber berubah.
+- **Partisi & cluster** hanya diset saat tabel dibuat. Kalau diubah setelah tabel ada, perlu `--refresh drop_resources`.
+- **Cursor bernilai NULL**: query incremental `WHERE cursor >= last_value` tidak pernah mengembalikan NULL. Default `on_cursor_null: raise` menjalankan `COUNT(*) ... WHERE cursor IS NULL` dulu, lalu gagal dengan pesan jelas kalau ada. `include` artinya baris NULL ikut diambil **setiap run**. `exclude` artinya sengaja diabaikan.
+- **Beban ke DB sumber**: `max_active_tasks` (default 4) membatasi tabel paralel per run. Untuk batas global lintas run, buat pool (`airflow pools set sqlserver_main 4 "SQL Server main"`) lalu isi `pool: sqlserver_main` di YAML source.
+- **Biaya BigQuery**: bronze dipartisi `DATE(_ingested_at)` dan di-cluster per PK, jadi silver incremental hanya scan N hari terakhir. Cek `INFORMATION_SCHEMA` di tiap model kena minimum billing 10 MB.
+- **Label job BigQuery** (`layer`, `model`, `pipeline`) bisa dipakai untuk memantau biaya per model di `INFORMATION_SCHEMA.JOBS`.
 
-Ini bug kosmetik yang sudah diketahui di dlt dengan Airflow 3
-([dlt#4462](https://github.com/dlt-hub/dlt/issues/4462)): supervisor Airflow 3
-menandai semua keluaran stderr sebagai ERROR, sehingga log INFO dari dlt ikut
-merah. **Task yang benar-benar gagal ditandai merah di grid view**, bukan di
-warna teks log. Selama task-nya hijau, abaikan warna lognya.
+## Troubleshooting
 
-### `Can't open lib 'ODBC Driver 18 for SQL Server'`
+| Gejala | Penyebab / solusi |
+|---|---|
+| `403 ... insufficient authentication scopes` | Access scope VM belum `cloud-platform` (setup langkah 1) |
+| `Login timeout expired` / `TCP Provider` | IP VM belum ada di authorized networks, atau IP berubah (belum statis) |
+| `SSL Provider: certificate verify failed` | Tambahkan `"TrustServerCertificate": "yes"` di extra connection |
+| `Can't open lib 'ODBC Driver 18 for SQL Server'` | Container masih pakai image lama, cek `AIRFLOW_IMAGE_NAME` di `.env` |
+| `Cannot read and write in different locations` | Bucket lake dan dataset BQ beda region |
+| DAG tidak muncul | Cek *Import Errors* di UI / `python -m medallion.validate --dagbag`. File DAG harus mengandung kata `airflow` dan `dag` |
+| `ConfigError: ...` | Pesan menyebut file & key yang salah. YAML lain tetap jalan karena 1 file DAG per source. |
+| Task bronze **skipped** | Ada param `tables` saat trigger, dan tabel itu tidak termasuk |
 
-Driver belum terpasang di tempat kode dijalankan.
+## Roadmap
 
-- Di VM: `docker compose build --no-cache` lalu cek
-  `docker compose run --rm airflow-cli odbcinst -q -d`
-- Di laptop: lihat [Setup ODBC Driver 18](#setup-odbc-driver-18)
+1. **dbt**: file `sql/silver|gold/*.sql` sudah pakai `ref()` / `source()` / `this`. Migrasinya: bungkus bagian SELECT jadi model dbt (`materialized='incremental'`, `unique_key`), lalu blok `IF/MERGE` dihapus.
+2. **Sync DAG otomatis dari GitHub**: Airflow 3 punya `GitDagBundle` (`apache-airflow-providers-git`, `tracking_ref`, `subdir`, `git_conn_id`). Factory sudah menghitung path dari `__file__`, jadi aman untuk bundle berversi. Atau pakai GitHub Actions yang menjalankan `pytest` + `scripts/deploy.sh`.
+3. **Secret Manager**: set `[secrets] backend = CloudSecretManagerBackend`. Kode DAG tidak perlu diubah (tetap `{{ conn[...] }}`).
+4. **Data quality**: tambah model/task check (row count bronze vs sumber, freshness `_ingested_at`).
 
-### `Login failed for user` padahal password benar
+## Status verifikasi
 
-Hampir selalu karena karakter khusus di password. Kode ini merakit connection
-string lewat `sqlalchemy.engine.URL.create`, yang sudah meng-escape dengan
-benar — jadi kalau tetap gagal, periksa cara penulisan di `.env`:
+Sudah dites di sandbox (dlt 1.30.0 + Postgres 16 sebagai pengganti sumber). Hasil pytest: **49 passed** (env dlt) dan **28 passed** di masing-masing Airflow 3.3.2, 3.1.8, dan 3.0.6. `airflow dags test` end-to-end dijalankan di 3.3.2 dan 3.1.8. Di 3.0.6 tidak bisa, karena environment sandbox tanpa constraints file (DAG trivial pun gagal di sana); import DAG-nya sendiri sudah lolos.
 
-- tulis polos: `MSSQL_PASSWORD=abc123`
-- **jangan** pakai tanda kutip: `MSSQL_PASSWORD="abc123"`
-- **jangan** ada spasi di sekitar `=`
-- **jangan** ada karakter `#` di dalam nilai (dianggap awal komentar)
+- Semua DAG ter-import tanpa error. YAML rusak hanya menjatuhkan DAG miliknya sendiri, dan deploy yang gagal validasi tidak menyentuh `dags/` live.
+- `airflow dags test` bronze end-to-end: Airflow Connection → template → venv dlt → load. Password tidak bocor di log maupun Rendered Template (`***`). Asset event dan XCom ringkasan terbentuk.
+- Incremental + lookback, backfill param, backfill Airflow (konversi UTC → WIB), filter `tables`, dan tabel full yang di-skip saat backfill.
+- Paket load yang tertunda diselesaikan dulu, dan window run baru tetap di-extract. Cursor NULL terdeteksi sebelum extract.
+- DDL BigQuery yang dibuat dlt (dibangkitkan offline): tipe, `PARTITION BY DATE(_ingested_at)`, `CLUSTER BY` snake_case.
+- Retensi file staging (`keep_files`), dites lewat jalur staging dlt yang sama dengan BigQuery. `--refresh` tidak menghapus file lake.
+- Render template silver/gold di Airflow asli (`airflow tasks render`), syntax BigQuery via sqlglot, logika SELECT dicoba di DuckDB.
+- Kode sudah di-review oleh reviewer independen. Temuannya sudah diperbaiki: backfill paralel, paket tertunda, cursor NULL, lookback silver/gold yang sekarang dihitung dari progres tabel target.
 
-### Task ingestion dimatikan karena kehabisan memori
+**Belum bisa dites dari sandbox** (akses registry Docker & repo Microsoft diblokir, dan tidak ada akses GCP): build `docker/Dockerfile` (instalasi `msodbcsql18`), koneksi nyata ke SQL Server via pyodbc, load job nyata ke BigQuery/GCS, dan eksekusi SQL silver/gold di BigQuery. Urutan tes pertama di VM:
 
-Gejalanya: task mati tanpa traceback, `docker compose logs airflow-scheduler`
-menunjukkan OOM kill.
-
-Urutan yang dicoba:
-
-1. Kecilkan `chunk_size` tabel itu di config (mis. `50000` → `10000`)
-2. Kecilkan `file_max_bytes` di `.dlt/config.toml` (128 MB → 64 MB)
-3. Buang kolom berat dengan `exclude_columns`
-4. Kalau masih juga, kecilkan `AIRFLOW__CORE__PARALLELISM` di compose
-
-Pastikan `DLT_DATA_DIR` menunjuk ke `/opt/dlt` (disk data), bukan temp folder
-sistem. Kalau tidak, file kerja dlt menumpuk di boot disk 20 GB dan penuh di
-run pertama.
-
-### Disk penuh
-
-```bash
-df -h /data
-du -sh /data/airflow/logs /data/dlt
-```
-
-Log Airflow tidak dibersihkan otomatis. Pasang cron:
-
-```bash
-0 3 * * * find /data/airflow/logs -type f -mtime +30 -delete
-0 3 * * * find /data/airflow/logs -type d -empty -delete
-```
-
-File kerja dlt dihapus otomatis setelah task selesai (`wipe_local_data=True`).
-Kalau ada sisa, biasanya dari task yang dimatikan paksa — aman dihapus manual
-saat tidak ada DAG yang jalan.
-
-### DAG muncul bernama `bronze_ingest_RUSAK_...`
-
-Config YAML-nya tidak bisa dibaca. Buka tab **Docs** pada DAG itu; pesan
-lengkapnya ada di sana. Ini disengaja: config rusak membuat DAG yang gagal
-dengan jelas, bukan DAG yang hilang diam-diam.
-
-Periksa di laptop sebelum push:
-
-```bash
-python -m pb_dwh.cli validate
-```
-
-### Kolom decimal mendarat sebagai BIGNUMERIC
-
-Disengaja. BigQuery `NUMERIC` hanya menampung presisi 38 dengan skala 9. Kolom
-yang skalanya lebih dari 9 otomatis jadi `BIGNUMERIC` agar tidak ada digit yang
-hilang. Kalau layer silver cukup dengan `NUMERIC`, lakukan `CAST` di query
-silver, bukan di bronze — bronze menyimpan apa adanya.
-
-### Kolom `datetime2` kehilangan digit terakhir
-
-`datetime2(7)` di SQL Server berpresisi 100 nanodetik, sedangkan BigQuery
-`TIMESTAMP` hanya mikrodetik. Digit terakhir memang terpotong. Ini diterima apa
-adanya, bukan bug. Kalau presisi penuh benar-benar dibutuhkan, simpan kolom itu
-sebagai `STRING` lewat `column_overrides`.
-
-### `column_overrides` tidak berpengaruh
-
-Karena `defer_table_reflect=True`, schema diputuskan saat task berjalan dan bisa
-menimpa hint kolom. Naikkan `reflection_level` tabel itu menjadi
-`full_with_precision`.
-
-### Baris yang dihapus di SQL Server masih ada di BigQuery
-
-`merge` hanya menangani baris baru dan baris yang berubah; penghapusan tidak
-terdeteksi. Untuk tabel yang barisnya bisa dihapus, pakai
-`write_disposition: replace`. Untuk tabel besar yang butuh deteksi penghapusan,
-itu memerlukan CDC dan belum dibangun di sini.
-
----
-
-## Catatan teknis
-
-Beberapa keputusan yang tidak terlihat jelas dari kode, dan alasannya.
-
-**`table_names` diisi eksplisit, bukan `.with_resources()`.** dlt hanya akan
-me-reflect tabel yang disebut, bukan seluruh isi schema. Untuk database dengan
-ratusan tabel, ini perbedaan antara reflection beberapa detik dan beberapa
-menit.
-
-**`defer_table_reflect=True`.** Reflection baru terjadi saat task berjalan.
-Tanpa ini, DAG processor akan membuka koneksi ke SQL Server setiap kali DAG
-di-parse — untuk 100 tabel, setiap 30 detik, selamanya.
-
-**Dua task per tabel: `ke_gcs` lalu `ke_bq`.** `ke_gcs` menjalankan dlt dengan
-tujuan GCS (selalu `append`, satu folder per tanggal, jadi GCS menyimpan riwayat
-setiap run) dan mengembalikan daftar file yang ditulisnya lewat XCom. `ke_bq`
-memuat tepat file-file itu, bukan menebak dari tanggal. Task `ke_gcs` antar-tabel
-dirantai berurutan: dua tabel besar yang diekstrak bersamaan adalah cara
-tercepat menghabiskan RAM 20 GB. `ke_bq` ringan, jadi boleh jalan bersamaan
-dengan ekstraksi tabel berikutnya. Paralelisme antar-DAG diatur pool
-`dlt_ingest` (hanya dipakai `ke_gcs`).
-
-Helper Airflow bawaan dlt (`PipelineTasksGroup`) sengaja tidak dipakai: ia
-menjalankan extract sampai load dalam satu task dan tidak mengembalikan info
-load, jadi tahap BigQuery tidak bisa dipisah.
-
-**`backend="pyarrow"`, bukan `connectorx`.** Jalur Arrow → Parquet membuat tahap
-normalize dlt hampir tanpa biaya, dan itu yang paling menentukan hemat memori.
-
-**BigQuery diisi load job dari Parquet di GCS.** Bukan streaming insert: lebih
-murah, tidak kena kuota streaming, dan data langsung bisa di-query. `replace`
-memakai `WRITE_TRUNCATE_DATA`, yang menimpa data tapi mempertahankan skema,
-PRIMARY KEY, dan CLUSTER BY dari DDL — `WRITE_TRUNCATE` biasa justru mengganti
-skema dengan skema file dan membuang constraint.
-
-**`DLT_PROJECT_DIR` dan `DLT_DATA_DIR` sengaja berbeda.** Yang pertama menunjuk
-ke repo (tempat `.dlt/config.toml`), yang kedua ke disk data (tempat file kerja
-ditulis). Kalau keduanya disamakan, `.dlt/config.toml` tidak terbaca dan semua
-setelan rotasi file diam-diam tidak berlaku.
-
-**Nama tabel & kolom tidak diubah ke snake_case.** `.dlt/config.toml` memakai
-naming `sql_cs_v1`, jadi `AIMHeader.nomorAIM` di SQL Server tetap
-`AIMHeader.nomorAIM` di BigQuery — sama dengan bronze Datastream lama. Default
-dlt (`snake_case`) akan menghasilkan `aim_header.nomor_aim`. Mengganti naming
-setelah data produksi dimuat berarti membuang dan memuat ulang semua tabel.
-
-**Kolom datetime mendarat sebagai `TIMESTAMP`, bukan `DATETIME`.** Parquet
-tulisan dlt menyimpan waktu sebagai timestamp UTC, dan kolom `TIMESTAMP` di DDL
-harus cocok dengannya. Bronze Datastream memakai `DATETIME`,
-jadi query silver lama perlu `DATETIME(kolom)` di kolom waktu. Nilainya jam WIB
-apa adanya berlabel UTC; jangan pakai `DATETIME(kolom, 'Asia/Jakarta')`.
-
-**Dataset dan tabel bronze dibuat manual**, dari file di `sql/ddl/`, sebelum
-DAG-nya jalan pertama kali. SA Airflow hanya punya `bigquery.dataEditor` di
-dataset itu dan `bigquery.jobUser` di project, jadi tidak bisa membuat dataset
-atau menulis ke dataset lain. Load job memakai `CREATE_NEVER`: tabel yang belum
-dibuat membuat `ke_bq` gagal dengan pesan yang menunjuk ke file DDL, bukan
-muncul sendiri dengan tipe tebakan. Kolom baru di SQL Server juga membuat load
-gagal sampai kolomnya ditambahkan di DDL — skema bronze hanya berubah lewat DDL
-yang di-commit. State dlt (termasuk nilai cursor incremental) disimpan di GCS,
-bukan di BigQuery.
-
-**Dataset dlt terpisah dari dataset Datastream.** Datastream lama menulis ke
-`pb_bronze_dc_<dc>_dbo`; dlt menulis ke `pb_bronze_dlt_dc_<dc>_dbo`. Tabel
-Datastream punya kolom `datastream_metadata` dan dibaca view di
-`pb_original_data_source`; kalau dlt menulis ke dataset yang sama, tabelnya
-ditimpa dengan schema berbeda dan view-view itu rusak.
-
-**Hanya paket `dlt` (Apache 2.0).** Jangan pasang `dlthub`, itu produk berbayar
-yang berbeda.
-
-### Menyamakan versi
-
-Versi paket ditulis di dua tempat yang belum disatukan:
-
-- `requirements.txt` — dipakai untuk menjalankan di laptop
-- `docker/Dockerfile` — dipakai untuk membangun image VM
-
-Kalau menaikkan versi, ubah keduanya. Menyatukannya (Dockerfile membaca
-`requirements.txt`) adalah perbaikan yang layak dilakukan nanti.
+1. `./scripts/deploy.sh --image`
+2. Trigger `bronze__sqlserver_main` dengan param `tables: ["dbo.Product"]` (tabel kecil), lalu cek tabel BQ dan file di GCS.
+3. Trigger 1 tabel incremental dengan `backfill_start`/`backfill_end` 1 hari.
+4. Unpause kedua DAG.

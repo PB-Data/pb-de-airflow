@@ -1,0 +1,11 @@
+# Config khusus test (MEDALLION_CONFIG_DIR=tests/fixtures/configs)
+gcp:
+  bq_project: test-project
+  bq_location: asia-southeast2
+lake:
+  bucket_url: file:///tmp/medallion-test-lake
+  keep_files: true
+runtime:
+  timezone: Asia/Jakarta
+defaults:
+  retries: 0

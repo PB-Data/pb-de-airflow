@@ -1,33 +1,45 @@
-"""Penjaga file di dags/ yang tidak butuh Airflow terpasang.
-
-Airflow (dag_discovery_safe_mode, default) melewati file .py yang tidak memuat
-kata "airflow" serta "dag" atau "asset", tanpa error apa pun. Pernah terjadi:
-bronze_ingest.py tidak mengimpor airflow secara langsung, sehingga DAG
-ingestion tidak pernah muncul di UI.
-"""
-
-from __future__ import annotations
-
-from pathlib import Path
+"""Test import DAG dengan Airflow 3 (dijalankan di environment yang ada Airflow-nya)."""
 
 import pytest
 
-DAGS = Path(__file__).resolve().parents[1] / "dags"
+pytest.importorskip("airflow")
 
-# File yang memang tidak mendefinisikan DAG (modul pembantu) diberi awalan _.
-FILE_DAG = sorted(p for p in DAGS.glob("*.py") if not p.name.startswith("_"))
-
-
-def test_ada_file_dag() -> None:
-    assert FILE_DAG, f"tidak ada file DAG di {DAGS}"
+from conftest import DAGS_DIR  # noqa: E402
 
 
-@pytest.mark.parametrize("path", FILE_DAG, ids=lambda p: p.name)
-def test_file_dag_lolos_heuristik_airflow(path: Path) -> None:
-    # Sama dengan airflow.utils.file.might_contain_dag_via_default_heuristic.
-    isi = path.read_bytes().lower()
-    assert b"airflow" in isi, (
-        f"{path.name} tidak memuat kata 'airflow', jadi dilewati DAG processor. "
-        "Tambahkan kata itu di docstring."
-    )
-    assert b"dag" in isi or b"asset" in isi, f"{path.name} tidak memuat kata 'dag'."
+@pytest.fixture(scope="module")
+def dagbag():
+    import inspect
+
+    try:
+        from airflow.dag_processing.dagbag import DagBag
+    except ImportError:  # Airflow 3.0 / 3.1
+        from airflow.models.dagbag import DagBag
+
+    kwargs = {"dag_folder": str(DAGS_DIR)}
+    if "include_examples" in inspect.signature(DagBag.__init__).parameters:
+        kwargs["include_examples"] = False
+    return DagBag(**kwargs)
+
+
+def test_tidak_ada_import_error(dagbag):
+    assert dagbag.import_errors == {}
+
+
+def test_bronze_dag(dagbag):
+    dag = dagbag.dags["bronze__sqlserver_main"]
+    assert {t.task_id for t in dag.tasks} == {"dbo__customer", "dbo__sales_order_header", "dbo__sales_order_detail", "dbo__product"}
+    assert dag.max_active_runs == 1
+    task = dag.get_task("dbo__customer")
+    assert type(task).__name__ == "ExternalPythonOperator"
+    assert [a.uri for a in task.outlets] == ["bigquery://smi-dwh/bronze_sqlserver_main/dbo__customer"]
+    assert type(dag.timetable).__name__ == "CronDataIntervalTimetable"
+    assert task.max_active_tis_per_dag == 1  # aman dari backfill paralel
+
+
+def test_transform_dag(dagbag):
+    dag = dagbag.dags["transform__sales"]
+    gold = dag.get_task("gold__daily_sales")
+    assert gold.upstream_task_ids == {"silver__sales_order", "silver__sales_order_line", "silver__product"}
+    assert "ensure_datasets" in dag.get_task("silver__customer").upstream_task_ids
+    assert type(dag.timetable).__name__ == "AssetTriggeredTimetable"

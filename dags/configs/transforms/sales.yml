@@ -1,0 +1,26 @@
+# =====================================================================
+# Transform silver & gold domain "sales"  (BigQueryInsertJobOperator)
+# DAG yang dihasilkan: transform__sales  (file DAG: dags/transform__sales.py)
+#
+# - 1 file SQL = 1 model = 1 task. Nama tabel = nama file.
+# - Dependency otomatis dari {{ ref('...') }} / {{ source('...') }} di SQL (seperti dbt).
+# - Urutan list di bawah tidak penting.
+# =====================================================================
+description: Silver & gold domain sales dari sqlserver_main
+schedule: assets        # jalan otomatis setelah SEMUA tabel bronze yang dipakai ter-update
+                        # alternatif: cron, mis. "0 3 * * *" (WIB), atau "none" (manual)
+lookback_days: 3        # model incremental membaca partisi bronze 3 hari terakhir
+tags: [sales]
+
+datasets:
+  silver: silver_sales
+  gold: gold_sales
+
+models:
+  - silver/sales/customer.sql
+  - silver/sales/product.sql
+  - silver/sales/sales_order.sql
+  - silver/sales/sales_order_line.sql
+  - sql: gold/sales/daily_sales.sql
+    description: Omzet harian per toko & kategori produk
+    labels: {domain: sales}

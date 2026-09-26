@@ -1,8 +1,6 @@
-# Repo ini di-checkout di VM Linux. Paksa LF supaya script di dalam
-# Dockerfile dan docker-compose.yml tidak pecah karena carriage return.
-* text=auto eol=lf
-*.sh        text eol=lf
-*.yml       text eol=lf
-*.yaml      text eol=lf
-Dockerfile  text eol=lf
-.env.example text eol=lf
+# Script bash harus LF walau di-clone di Windows (bash di VM gagal kalau CRLF)
+*.sh   text eol=lf
+*.py   text eol=lf
+*.sql  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf

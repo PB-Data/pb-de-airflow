@@ -1,33 +1,18 @@
-# Kredensial -- jangan pernah masuk repo
-.env
-.env.*
-!.env.example
-docker/.env
-docker/.env.*
-!docker/.env.example
-*.env
-!*.env.example
-
-# Rahasia dlt. Semua kredensial lewat environment variable, file ini tidak
-# boleh ada -- tapi kalau dlt sempat membuatnya, jangan sampai ikut ter-commit.
-.dlt/secrets.toml
-
-# Folder kerja dlt
-.dlt/pipelines/
-**/_storage/
-
 # Python
 __pycache__/
 *.pyc
 .venv/
+venv/
 .pytest_cache/
 
-# Dokumen Office (dokumentasi, spreadsheet kerja). Disimpan di luar repo,
-# mis. rahman/Dokumentasi Silver Layer.xlsx.
-*.doc
-*.docx
-*.xls
-*.xlsx
-*.xlsm
-# File kunci sementara saat dokumen Office sedang dibuka
-~$*
+# dlt lokal (JANGAN commit secrets)
+.dlt/
+**/.dlt/
+.local/
+*.duckdb
+
+# deploy & env
+scripts/deploy.env
+.deploy_tmp/
+.env
+dlt_data/

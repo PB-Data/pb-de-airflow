@@ -1,0 +1,29 @@
+# =====================================================================
+# Taruh file ini di folder yang SAMA dengan docker-compose.yaml Airflow di VM.
+# `docker compose` otomatis menggabungkan (merge) file override ini dengan docker-compose.yaml.
+#
+# Yang ditambahkan:
+#  - DLT_DATA_DIR  : state & file sementara dlt disimpan di volume (tidak hilang saat container dibuat ulang)
+#  - google_cloud_default: pakai service account VM (ADC), project BigQuery smi-dwh
+#  - FERNET_KEY    : enkripsi password Connection di metadata DB
+#
+# Image custom di-set lewat .env:  AIRFLOW_IMAGE_NAME=smi-airflow:3.1.6-dlt
+# Nama service di bawah = nama service di docker-compose.yaml resmi Airflow 3.
+# Kalau ada service yang tidak kamu pakai (mis. airflow-worker di LocalExecutor), hapus baris itu.
+# =====================================================================
+x-medallion: &medallion
+  environment:
+    DLT_DATA_DIR: /opt/airflow/dlt_data
+    AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT: '{"conn_type": "google_cloud_platform", "extra": {"project": "smi-dwh"}}'
+    # compose resmi men-set FERNET_KEY kosong (password Connection tersimpan plaintext) -> isi di .env
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+  volumes:
+    - ${AIRFLOW_PROJ_DIR:-.}/dlt_data:/opt/airflow/dlt_data
+
+services:
+  airflow-apiserver: *medallion
+  airflow-scheduler: *medallion
+  airflow-dag-processor: *medallion
+  airflow-worker: *medallion
+  airflow-triggerer: *medallion
+  airflow-init: *medallion

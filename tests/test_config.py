@@ -1,414 +1,157 @@
-"""Uji pembacaan dan validasi config.
+"""Test validasi YAML, normalisasi nama, dan logika window incremental/backfill."""
 
-Semua test di sini sengaja tidak menyentuh database, jaringan, dlt, maupun
-Airflow. Jadi bisa dijalankan di laptop mana pun dengan:
-
-    pip install -r requirements-dev.txt
-    pytest -q
-"""
-
-from __future__ import annotations
-
-import textwrap
-from datetime import date, datetime
-from pathlib import Path
+from datetime import date, datetime, timezone
 
 import pytest
 
-from pb_dwh.config.loader import load_all_source_configs, load_source_config
-from pb_dwh.config.models import ConfigError, TableConfig, periksa_dukungan_alur
-
-SOURCE_MINIMAL = """
-source:
-  name: uji
-  env_prefix: UJI
-  schema: dbo
-  bq_dataset: bronze_uji
-
-tables:
-  - name: pesanan
-    primary_key: [pesanan_id]
-    cursor: modified_at
-    lookback_days: 2
-"""
-
-
-@pytest.fixture
-def folder_config(tmp_path: Path, monkeypatch) -> Path:
-    """Folder config sementara, lengkap dengan settings.yml."""
-    (tmp_path / "sources").mkdir()
-    (tmp_path / "settings.yml").write_text(
-        textwrap.dedent(
-            """
-            defaults:
-              write_disposition: merge
-              chunk_size: 12345
-            pipeline:
-              backend: pyarrow
-            airflow:
-              schedule: "30 2 * * *"
-            """
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("PB_DWH_CONFIG_DIR", str(tmp_path))
-    return tmp_path
-
-
-def tulis_source(folder: Path, isi: str, nama: str = "uji.yml") -> Path:
-    path = folder / "sources" / nama
-    path.write_text(textwrap.dedent(isi), encoding="utf-8")
-    return path
-
-
-# ---------------------------------------------------------------------------
-# Pembacaan
-# ---------------------------------------------------------------------------
-
-
-def test_membaca_source_minimal(folder_config: Path) -> None:
-    cfg = load_source_config(tulis_source(folder_config, SOURCE_MINIMAL))
-
-    assert cfg.name == "uji"
-    assert cfg.dag_id == "bronze_ingest_uji"
-    assert cfg.pipeline_name == "bronze_uji"
-    assert cfg.table_names == ["pesanan"]
-
-    tabel = cfg.table("pesanan")
-    assert tabel.primary_key == ("pesanan_id",)
-    assert tabel.write_disposition == "merge"
-
-
-def test_database_opsional(folder_config: Path) -> None:
-    # Tanpa `database`, nama database nanti dibaca dari {env_prefix}_DATABASE.
-    cfg = load_source_config(tulis_source(folder_config, SOURCE_MINIMAL))
-    assert cfg.database == ""
-
-    dengan_database = SOURCE_MINIMAL.replace(
-        "  env_prefix: UJI\n", "  env_prefix: UJI\n  database: PB_DC_SBY\n"
-    )
-    cfg = load_source_config(tulis_source(folder_config, dengan_database))
-    assert cfg.database == "PB_DC_SBY"
-
-
-def test_settings_yml_jadi_default(folder_config: Path) -> None:
-    cfg = load_source_config(tulis_source(folder_config, SOURCE_MINIMAL))
-
-    # chunk_size tidak ditulis di file source, jadi diambil dari settings.yml.
-    assert cfg.table("pesanan").chunk_size == 12345
-    assert cfg.schedule == "30 2 * * *"
-
-
-def test_setelan_tabel_menang_atas_defaults(folder_config: Path) -> None:
-    cfg = load_source_config(
-        tulis_source(
-            folder_config,
-            """
-            source:
-              name: uji
-              env_prefix: UJI
-              schema: dbo
-              bq_dataset: bronze_uji
-            defaults:
-              chunk_size: 500
-            tables:
-              - name: kecil
-                primary_key: [id]
-              - name: besar
-                chunk_size: 10
-                primary_key: [id]
-            """,
-        )
-    )
-
-    assert cfg.table("kecil").chunk_size == 500
-    assert cfg.table("besar").chunk_size == 10
-
-
-def test_primary_key_boleh_string_tunggal(folder_config: Path) -> None:
-    cfg = load_source_config(
-        tulis_source(
-            folder_config,
-            """
-            source: {name: uji, env_prefix: UJI, schema: dbo, bq_dataset: b}
-            tables:
-              - name: t
-                primary_key: id
-            """,
-        )
-    )
-    assert cfg.table("t").primary_key == ("id",)
-
-
-def test_initial_value_tanggal_jadi_datetime(folder_config: Path) -> None:
-    cfg = load_source_config(
-        tulis_source(
-            folder_config,
-            """
-            source: {name: uji, env_prefix: UJI, schema: dbo, bq_dataset: b}
-            tables:
-              - name: t
-                primary_key: [id]
-                cursor: modified_at
-                initial_value: 2024-01-01
-            """,
-        )
-    )
-    assert cfg.table("t").initial_value == datetime(2024, 1, 1)
-
-
-def test_start_date_terbaca_sebagai_date(folder_config: Path) -> None:
-    cfg = load_source_config(
-        tulis_source(
-            folder_config,
-            """
-            source:
-              name: uji
-              env_prefix: UJI
-              schema: dbo
-              bq_dataset: b
-              start_date: 2025-06-15
-            tables:
-              - name: t
-                primary_key: [id]
-            """,
-        )
-    )
-    assert cfg.start_date == date(2025, 6, 15)
-
-
-# ---------------------------------------------------------------------------
-# Validasi: yang penting adalah kesalahan ini TIDAK lolos diam-diam
-# ---------------------------------------------------------------------------
-
-
-def test_merge_tanpa_primary_key_ditolak(folder_config: Path) -> None:
-    with pytest.raises(ConfigError, match="primary_key"):
-        load_source_config(
-            tulis_source(
-                folder_config,
-                """
-                source: {name: uji, env_prefix: UJI, schema: dbo, bq_dataset: b}
-                tables:
-                  - name: t
-                    write_disposition: merge
-                """,
-            )
-        )
-
-
-def test_replace_dengan_cursor_ditolak(folder_config: Path) -> None:
-    with pytest.raises(ConfigError, match="replace"):
-        load_source_config(
-            tulis_source(
-                folder_config,
-                """
-                source: {name: uji, env_prefix: UJI, schema: dbo, bq_dataset: b}
-                tables:
-                  - name: t
-                    write_disposition: replace
-                    cursor: modified_at
-                """,
-            )
-        )
-
-
-def test_lookback_tanpa_cursor_ditolak(folder_config: Path) -> None:
-    with pytest.raises(ConfigError, match="lookback_days butuh cursor"):
-        load_source_config(
-            tulis_source(
-                folder_config,
-                """
-                source: {name: uji, env_prefix: UJI, schema: dbo, bq_dataset: b}
-                tables:
-                  - name: t
-                    primary_key: [id]
-                    lookback_days: 3
-                """,
-            )
-        )
-
-
-def test_cursor_integer_dengan_lookback_days_ditolak(folder_config: Path) -> None:
-    with pytest.raises(ConfigError, match="lookback_days"):
-        load_source_config(
-            tulis_source(
-                folder_config,
-                """
-                source: {name: uji, env_prefix: UJI, schema: dbo, bq_dataset: b}
-                tables:
-                  - name: t
-                    primary_key: [id]
-                    cursor: id
-                    cursor_type: integer
-                    lookback_days: 3
-                """,
-            )
-        )
-
-
-def test_primary_key_di_exclude_columns_ditolak(folder_config: Path) -> None:
-    with pytest.raises(ConfigError, match="Primary key"):
-        load_source_config(
-            tulis_source(
-                folder_config,
-                """
-                source: {name: uji, env_prefix: UJI, schema: dbo, bq_dataset: b}
-                tables:
-                  - name: t
-                    primary_key: [id]
-                    exclude_columns: [id]
-                """,
-            )
-        )
-
-
-def test_nama_tabel_duplikat_ditolak(folder_config: Path) -> None:
-    with pytest.raises(ConfigError, match="lebih dari sekali"):
-        load_source_config(
-            tulis_source(
-                folder_config,
-                """
-                source: {name: uji, env_prefix: UJI, schema: dbo, bq_dataset: b}
-                tables:
-                  - name: t
-                    primary_key: [id]
-                  - name: t
-                    primary_key: [id]
-                """,
-            )
-        )
-
-
-def test_kunci_salah_ketik_ditolak(folder_config: Path) -> None:
-    with pytest.raises(ConfigError, match="tidak dikenal"):
-        load_source_config(
-            tulis_source(
-                folder_config,
-                """
-                source: {name: uji, env_prefix: UJI, schema: dbo, bq_dataset: b}
-                tables:
-                  - name: t
-                    primary_key: [id]
-                    lookbackdays: 3
-                """,
-            )
-        )
-
-
-def test_schema_per_tabel_memberi_pesan_yang_menuntun(folder_config: Path) -> None:
-    with pytest.raises(ConfigError, match="file config baru"):
-        load_source_config(
-            tulis_source(
-                folder_config,
-                """
-                source: {name: uji, env_prefix: UJI, schema: dbo, bq_dataset: b}
-                tables:
-                  - name: t
-                    primary_key: [id]
-                    schema: sales
-                """,
-            )
-        )
-
-
-def test_source_name_kembar_antar_file_ditolak(folder_config: Path) -> None:
-    tulis_source(folder_config, SOURCE_MINIMAL, "a.yml")
-    tulis_source(folder_config, SOURCE_MINIMAL, "b.yml")
-
-    with pytest.raises(ConfigError, match="lebih dari satu file"):
-        load_all_source_configs(folder_config / "sources")
-
-
-# ---------------------------------------------------------------------------
-# Perhitungan lookback
-# ---------------------------------------------------------------------------
-
-
-def test_lag_datetime_dihitung_dalam_detik() -> None:
-    tabel = TableConfig(name="t", cursor="modified_at", lookback_days=2)
-    assert tabel.incremental_lag == 2 * 86_400
-
-
-def test_lag_integer_apa_adanya() -> None:
-    tabel = TableConfig(name="t", cursor="id", cursor_type="integer", lookback=1000)
-    assert tabel.incremental_lag == 1000
-
-
-def test_tanpa_lookback_lag_none() -> None:
-    assert TableConfig(name="t", cursor="modified_at").incremental_lag is None
-
-
-def test_tanpa_cursor_lag_none() -> None:
-    assert TableConfig(name="t", lookback_days=5).incremental_lag is None
-
-
-# ---------------------------------------------------------------------------
-# Config yang benar-benar dipakai di repo ini harus selalu sah
-# ---------------------------------------------------------------------------
-
-
-def test_config_repo_sah() -> None:
-    """Penjaga: `config/sources/*.yml` yang di-commit tidak boleh rusak.
-
-    Tanpa test ini, config yang salah baru ketahuan setelah DAG di-deploy.
-    """
-    akar = Path(__file__).resolve().parents[1]
-    konfigurasi = load_all_source_configs(akar / "config" / "sources")
-    assert konfigurasi, "tidak ada config source di repo"
-    # Config di repo juga harus bisa dijalankan alur GCS -> BigQuery saat ini,
-    # bukan cuma sah secara config.
-    for cfg in konfigurasi:
-        periksa_dukungan_alur(cfg)
-
-
-# ---------------------------------------------------------------------------
-# Aturan alur GCS -> BigQuery
-# ---------------------------------------------------------------------------
-
-SOURCE_APPEND = """
-source:
-  name: uji
-  env_prefix: UJI
-  schema: dbo
-  bq_dataset: bronze_uji
+from medallion.config import ConfigError, load_source, normalize_path
+from medallion.bronze.runner import SkipTable, lag_for, resolve_window
+
+SOURCE_YML = """
+name: {name}
+type: mssql
+schedule: "0 1 * * *"
 defaults:
-  lookback_days: 2
+  lookback_hours: 48
+  initial_value: "2026-09-01T00:00:00"
 tables:
-  - name: log
-    write_disposition: append
-    cursor: dibuat_pada
+{tables}
 """
 
 
-def test_append_tidak_mewarisi_lookback(folder_config: Path) -> None:
-    # defaults punya lookback_days: 2, tapi tabel append tidak memintanya.
-    cfg = load_source_config(tulis_source(folder_config, SOURCE_APPEND))
-    assert cfg.table("log").lookback_days == 0
+def write_source(cfg, tables: str, name: str = "src_a", file_name: str | None = None):
+    (cfg / "sources" / f"{file_name or name}.yml").write_text(SOURCE_YML.format(name=name, tables=tables))
 
 
-def test_append_dengan_lookback_ditolak(folder_config: Path) -> None:
-    isi = SOURCE_APPEND.replace("cursor: dibuat_pada", "cursor: dibuat_pada\n    lookback_days: 1")
-    with pytest.raises(ConfigError, match="dua kali"):
-        load_source_config(tulis_source(folder_config, isi))
+# ------------------------------------------------------------------ naming
+IDENTIFIERS = [
+    "dbo__Customer", "dbo__SalesOrderHeader", "dbo__SaldoStokProdukToko", "sales__OrderDetail2024",
+    "dbo__tblABC_Item", "dbo__T_Trx_Header", "dbo__Kode-Barang", "dbo__2024Sales", "CustomerID",
+    "ModifiedDate", "orderID", "ABCTable", "dbo__tbl__double", "dbo__Name With Space", "x_",
+]
 
 
-def test_merge_sah_di_config_tapi_ditolak_alur(folder_config: Path) -> None:
-    cfg = load_source_config(tulis_source(folder_config, SOURCE_MINIMAL))
-    assert cfg.table("pesanan").write_disposition == "merge"
-    with pytest.raises(ConfigError, match="belum didukung"):
-        periksa_dukungan_alur(cfg)
+@pytest.mark.parametrize("ident", IDENTIFIERS)
+def test_naming_sama_dengan_dlt(ident):
+    naming = pytest.importorskip("dlt.common.normalizers.naming.snake_case")
+    assert normalize_path(ident) == naming.NamingConvention().normalize_path(ident)
 
 
-def test_replace_dan_append_didukung_alur(folder_config: Path) -> None:
-    periksa_dukungan_alur(load_source_config(tulis_source(folder_config, SOURCE_APPEND)))
+# ------------------------------------------------------------------ validasi YAML
+def test_typo_key_dikasih_saran(config_dir):
+    write_source(config_dir, "  - {table: dbo.Customer, load: incremental, cursor: ModifiedDate, primay_key: [CustomerID]}")
+    with pytest.raises(ConfigError, match="maksudnya 'primary_key'"):
+        load_source("src_a")
 
 
-def test_config_contoh_sah() -> None:
-    """File di `config/examples/` disalin orang jadi config sungguhan.
+def test_incremental_wajib_cursor(config_dir):
+    write_source(config_dir, "  - {table: dbo.Customer, load: incremental}")
+    with pytest.raises(ConfigError, match="cursor"):
+        load_source("src_a")
 
-    Tidak dibaca Airflow, jadi kalau rusak tidak ada yang sadar sampai
-    salinannya ditolak.
-    """
-    akar = Path(__file__).resolve().parents[1]
-    assert load_all_source_configs(akar / "config" / "examples")
+
+def test_merge_wajib_primary_key(config_dir):
+    write_source(config_dir, "  - {table: dbo.Customer, load: incremental, cursor: ModifiedDate, write_disposition: merge}")
+    with pytest.raises(ConfigError, match="primary_key"):
+        load_source("src_a")
+
+
+def test_nama_file_harus_sama_dengan_name(config_dir):
+    write_source(config_dir, "  - {table: dbo.Product, load: full}", name="src_a", file_name="beda")
+    with pytest.raises(ConfigError, match="nama file"):
+        load_source("beda")
+
+
+def test_tabel_bentrok_nama_target(config_dir):
+    write_source(config_dir, "  - {table: dbo.Customer, load: full}\n  - {table: dbo.customer, load: full}")
+    with pytest.raises(ConfigError, match="target_table"):
+        load_source("src_a")
+
+
+def test_default_dan_nama_target(config_dir):
+    write_source(
+        config_dir,
+        "  - {table: dbo.SalesOrderHeader, load: incremental, cursor: ModifiedDate, primary_key: [SalesOrderID]}\n"
+        "  - {table: dbo.Product, load: full, primary_key: [ProductID]}\n"
+        "  - {table: dbo.Old, load: full, enabled: false}",
+    )
+    src = load_source("src_a")
+    assert [t.target_table for t in src.tables] == ["dbo__sales_order_header", "dbo__product"]
+    header, product = src.tables
+    assert (header.write_disposition, product.write_disposition) == ("append", "replace")
+    assert header.cluster_by == ("SalesOrderID",)
+    assert header.initial_value == datetime(2026, 9, 1)
+    assert header.pipeline_name == "src_a__dbo__sales_order_header"
+
+
+# ------------------------------------------------------------------ window
+@pytest.fixture
+def src(config_dir):
+    write_source(
+        config_dir,
+        "  - {table: dbo.Customer, load: incremental, cursor: ModifiedDate}\n"
+        "  - {table: dbo.Daily, load: incremental, cursor: TxDate, initial_value: '2026-09-01', lookback_hours: 49}\n"
+        "  - {table: dbo.Offset, load: incremental, cursor: TxAt, initial_value: '2026-09-01T00:00:00+07:00'}\n"
+        "  - {table: dbo.Log, load: incremental, cursor: LogID, initial_value: 0, lookback_units: 100}\n"
+        "  - {table: dbo.Product, load: full}",
+    )
+    return load_source("src_a")
+
+
+def test_window_incremental_default(src):
+    w = resolve_window(src.get_table("dbo.Customer"), src, {"run_type": "scheduled"})
+    assert w.mode == "incremental" and w.start is None
+
+
+def test_window_full(src):
+    assert resolve_window(src.get_table("dbo.Product"), src, {"run_type": "scheduled"}).mode == "full"
+
+
+@pytest.mark.parametrize("ctx", [
+    {"backfill_start": "2026-09-01", "backfill_end": "2026-09-02"},
+    {"run_type": "backfill", "data_interval_start": "2026-09-01T18:00:00+00:00", "data_interval_end": "2026-09-02T18:00:00+00:00"},
+])
+def test_tabel_full_diskip_saat_backfill(src, ctx):
+    with pytest.raises(SkipTable):
+        resolve_window(src.get_table("dbo.Product"), src, ctx)
+
+
+def test_backfill_param_end_inklusif(src):
+    w = resolve_window(src.get_table("dbo.Customer"), src, {"backfill_start": "2026-09-01", "backfill_end": "2026-09-02"})
+    assert (w.mode, w.start, w.end) == ("backfill", datetime(2026, 9, 1), datetime(2026, 9, 3))
+
+
+def test_backfill_param_template_kosong_dianggap_tidak_ada(src):
+    # Airflow merender param None sebagai string "None"
+    w = resolve_window(src.get_table("dbo.Customer"), src, {"backfill_start": "None", "backfill_end": "None"})
+    assert w.mode == "incremental"
+
+
+def test_backfill_airflow_interval_dikonversi_ke_wib(src):
+    ctx = {"run_type": "DagRunType.BACKFILL", "data_interval_start": "2026-09-22T18:00:00+00:00",
+           "data_interval_end": "2026-09-23T18:00:00+00:00"}
+    w = resolve_window(src.get_table("dbo.Customer"), src, ctx)
+    assert (w.start, w.end) == (datetime(2026, 9, 23, 1), datetime(2026, 9, 24, 1))
+
+
+def test_backfill_cursor_date_dan_aware(src):
+    ctx = {"backfill_start": "2026-09-01", "backfill_end": "2026-09-01"}
+    daily = resolve_window(src.get_table("dbo.Daily"), src, ctx)
+    assert (daily.start, daily.end) == (date(2026, 9, 1), date(2026, 9, 2))
+    aware = resolve_window(src.get_table("dbo.Offset"), src, ctx)
+    assert aware.start == datetime(2026, 8, 31, 17, tzinfo=timezone.utc)
+
+
+def test_backfill_tidak_valid(src):
+    with pytest.raises(ConfigError):
+        resolve_window(src.get_table("dbo.Customer"), src, {"backfill_start": "2026-09-01"})
+    with pytest.raises(ConfigError):
+        resolve_window(src.get_table("dbo.Customer"), src, {"backfill_start": "2026-09-05", "backfill_end": "2026-09-01"})
+    with pytest.raises(ConfigError, match="datetime/date"):
+        resolve_window(src.get_table("dbo.Log"), src, {"backfill_start": "2026-09-01", "backfill_end": "2026-09-02"})
+
+
+def test_lag(src):
+    assert lag_for(src.get_table("dbo.Customer")) == 48 * 3600  # detik
+    assert lag_for(src.get_table("dbo.Daily")) == 3  # hari (dibulatkan ke atas)
+    assert lag_for(src.get_table("dbo.Log")) == 100  # unit cursor angka
