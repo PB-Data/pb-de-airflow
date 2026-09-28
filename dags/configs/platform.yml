@@ -18,7 +18,7 @@ lake:
 
 runtime:
   timezone: Asia/Jakarta             # timezone jadwal cron DAG
-  dlt_python: /opt/dlt-venv/bin/python  # venv dlt di dalam image Docker (lihat docker/Dockerfile)
+  dlt_python: /opt/dlt-venv/bin/python  # venv dlt di dalam image Docker (repo pb-airflow, docker/Dockerfile)
 
 defaults:
   owner: data-engineering

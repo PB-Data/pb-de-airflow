@@ -1,6 +1,0 @@
-# Package tambahan untuk environment AIRFLOW (bukan venv dlt).
-# Image resmi apache/airflow sudah membawa provider google & standard, jadi file ini boleh kosong.
-# Contoh kalau butuh versi provider google yang lebih baru:
-# apache-airflow-providers-google>=22.5.0
-# Contoh untuk GitDagBundle (sync DAG langsung dari GitHub, lihat README "Roadmap"):
-# apache-airflow-providers-git>=0.5.0

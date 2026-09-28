@@ -1,39 +1,38 @@
 #!/usr/bin/env bash
 # Dijalankan DI VM oleh deploy.sh / deploy.ps1 (jangan dijalankan manual di laptop).
-# Argumen: <REMOTE_DIR> <WITH_IMAGE:true|false> <IMAGE> <DOCKER_CMD...>
+# Argumen: <DAGS_DIR> <DOCKER_CMD...>
 #
-# Alur aman: extract ke folder staging -> (build image) -> validasi DAG di container sekali-pakai
-#            -> kalau lolos baru sync ke folder dags/ yang dipakai Airflow.
+# Alur aman: extract ke folder staging -> validasi DAG di container sekali-pakai
+#            -> kalau lolos baru sync ke DAGS_DIR yang dipakai Airflow.
+# Image & docker-compose Airflow dikelola repo pb-airflow; script ini tidak menyentuhnya.
 set -euo pipefail
-REMOTE_DIR="$1"; WITH_IMAGE="$2"; IMAGE="$3"; shift 3
+DAGS_DIR="$1"; shift
 DOCKER=("$@"); [[ ${#DOCKER[@]} -eq 0 ]] && DOCKER=(docker)
 
-cd ~ && cd "$REMOTE_DIR"
 command -v rsync >/dev/null || { echo "rsync belum ada di VM: sudo apt-get install -y rsync"; exit 1; }
+[[ -d "$DAGS_DIR" ]] || { echo "$DAGS_DIR tidak ada. Setup VM dulu lewat repo pb-airflow."; exit 1; }
 
-rm -rf .deploy/dags && mkdir -p .deploy/dags dags dlt_data
-tar -xzf /tmp/medallion_dags.tgz -C .deploy/dags && rm -f /tmp/medallion_dags.tgz
+# Validasi pakai image yang SEDANG dipakai scheduler: Airflow & venv dlt-nya sama persis.
+IMAGE=$("${DOCKER[@]}" ps --filter label=com.docker.compose.service=airflow-scheduler --format '{{.Image}}' | head -n1)
+[[ -n "$IMAGE" ]] || { echo "Container airflow-scheduler tidak jalan (pb-airflow: docker compose up -d)."; exit 1; }
 
-if [[ "$WITH_IMAGE" == "true" ]]; then
-  echo ">> Build image $IMAGE"
-  rm -rf .deploy/docker && mkdir -p .deploy/docker
-  tar -xzf /tmp/medallion_docker.tgz -C .deploy/docker && rm -f /tmp/medallion_docker.tgz
-  "${DOCKER[@]}" build -t "$IMAGE" -f .deploy/docker/Dockerfile .deploy/docker
-fi
+STAGE=~/.pb-dwh-deploy/dags
+rm -rf "$STAGE" && mkdir -p "$STAGE"
+tar -xzf /tmp/medallion_dags.tgz -C "$STAGE" && rm -f /tmp/medallion_dags.tgz
 
-echo ">> Validasi DAG baru (container sekali-pakai, belum menyentuh Airflow yang jalan)"
+echo ">> Validasi DAG baru dengan $IMAGE (container sekali-pakai, belum menyentuh Airflow yang jalan)"
 "${DOCKER[@]}" run --rm --entrypoint python -e PYTHONDONTWRITEBYTECODE=1 \
-  -v "$PWD/.deploy/dags:/opt/airflow/dags:ro" -w /opt/airflow/dags \
+  -v "$STAGE:/opt/airflow/dags:ro" -w /opt/airflow/dags \
   "$IMAGE" -m medallion.validate --dagbag
 
-echo ">> Sync ke dags/"
+echo ">> Sync ke $DAGS_DIR"
 # Update isi folder IN PLACE. Jangan hapus/ganti folder dags-nya: bind mount container
 # menempel ke folder lama, jadi container tidak akan melihat folder pengganti.
-rsync -a --delete --exclude='__pycache__' .deploy/dags/ dags/
-echo "   $(find dags -name '*.py' | wc -l) file .py, $(find dags/configs -name '*.yml' | wc -l) config, $(find dags/sql -name '*.sql' | wc -l) SQL"
-
-if [[ "$WITH_IMAGE" == "true" ]]; then
-  grep -q "^AIRFLOW_IMAGE_NAME=$IMAGE" .env 2>/dev/null || echo "!! Pastikan .env berisi AIRFLOW_IMAGE_NAME=$IMAGE"
-  "${DOCKER[@]}" compose up -d
+# Folder milik AIRFLOW_UID (pb-airflow) -> pakai sudo kalau user SSH tidak bisa menulis.
+if [[ -w "$DAGS_DIR" ]]; then
+  rsync -a --delete --exclude='__pycache__' "$STAGE/" "$DAGS_DIR/"
+else
+  sudo rsync -a --delete --exclude='__pycache__' --chown="$(stat -c %u:%g "$DAGS_DIR")" "$STAGE/" "$DAGS_DIR/"
 fi
+echo "   $(find "$DAGS_DIR" -name '*.py' | wc -l) file .py, $(find "$DAGS_DIR/configs" -name '*.yml' | wc -l) config, $(find "$DAGS_DIR/sql" -name '*.sql' | wc -l) SQL"
 echo "OK. DAG processor akan membaca perubahan dalam ~1 menit."

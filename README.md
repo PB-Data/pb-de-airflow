@@ -72,7 +72,6 @@ dlt cocok untuk kasus ini: `sql_table` (reflection skema, incremental, arrow) + 
 │       ├── config.py  catalog.py  validate.py
 │       ├── bronze/    runner.py cli.py connections.py adapters.py   (jalan di venv dlt)
 │       └── factory/   bronze_factory.py transform_factory.py        (jalan di Airflow)
-├── docker/     Dockerfile, requirements-dlt.txt (lock), docker-compose.override.yaml, env.example
 ├── infra/      gcp_setup.sh (IAM lintas project, bucket, IP statis, authorized network), SQL login read-only
 ├── scripts/    deploy.sh / deploy.ps1 (sync manual laptop → VM), remote_install.sh
 └── tests/      pytest: config, window incremental, e2e dlt, retensi lake, import DAG
@@ -112,37 +111,36 @@ Jalankan `infra/sqlserver_readonly_login.sql` sebagai admin (`sqlserver`) untuk 
 - `dags/configs/platform.yml`: `bq_project`, `bq_location`, `lake.bucket_url`.
 - `dags/configs/sources/sqlserver_main.yml`: tabel-tabel yang di-ingest (contoh di file itu masih dummy, ganti dengan tabel asli).
 
-### 4. Siapkan docker-compose di VM
+### 4. Airflow di VM (repo pb-airflow)
 
-Di folder `docker-compose.yaml` Airflow:
+Airflow, image (ODBC Driver 18 + venv dlt `/opt/dlt-venv`), `.env`, dan `FERNET_KEY` dikelola repo **pb-airflow**. Repo ini hanya mengisi folder DAG-nya (`/data/airflow/dags`). Sebelum deploy pertama, pastikan:
 
-- Copy `docker/docker-compose.override.yaml` ke folder ini (otomatis di-merge oleh `docker compose`).
-- Tambahkan isi `docker/env.example` ke `.env`: `AIRFLOW_IMAGE_NAME=smi-airflow:3.1.6-dlt` dan `AIRFLOW_FERNET_KEY`.
-- `mkdir -p dlt_data` (pakai user yang sama dengan pemilik `dags/`), lalu `sudo apt-get install -y rsync` kalau belum ada.
-- `ARG AIRFLOW_IMAGE` di `docker/Dockerfile` **harus sama dengan versi Airflow yang sekarang jalan** (cek dengan `docker compose exec airflow-scheduler airflow version`).
+- Airflow dari pb-airflow sudah jalan (`docker compose up -d`).
+- `rsync` terpasang di VM (`sudo apt-get install -y rsync`).
+- User SSH bisa menulis ke `/data/airflow/dags`. Kalau tidak bisa, script otomatis memakai `sudo`, dan owner folder tetap dipertahankan.
 
-### 5. Deploy pertama (build image + sync DAG)
+Versi dlt di `requirements-dev.txt` harus sama dengan `docker/requirements-dlt.in` di pb-airflow.
+
+### 5. Deploy (sync DAG)
 
 ```bash
-cp scripts/deploy.env.example scripts/deploy.env   # isi VM_NAME, VM_ZONE, VM_PROJECT, REMOTE_DIR
-./scripts/deploy.sh --image    # WAJIB --image untuk deploy pertama (image custom belum ada)
-./scripts/deploy.sh            # deploy berikutnya: sync dags/ saja
-# Windows PowerShell: .\scripts\deploy.ps1 -Image   /   .\scripts\deploy.ps1
+cp scripts/deploy.env.example scripts/deploy.env   # isi VM_NAME, VM_ZONE, VM_PROJECT
+./scripts/deploy.sh
+# Windows PowerShell: .\scripts\deploy.ps1
 ```
 
 Urutan kerja script deploy:
 
 1. Validasi lokal (`python -m medallion.validate`: YAML, `ref()`/`source()`, render & syntax SQL).
 2. Upload ke VM lewat `gcloud compute scp`.
-3. (`--image`) Build image di VM, termasuk ODBC Driver 18 dan venv dlt.
-4. Validasi **lagi di container sekali-pakai** (import DAG pakai Airflow asli). Kalau gagal, folder `dags/` yang sedang dipakai Airflow **tidak disentuh**.
-5. `rsync --delete` ke `dags/` (update in-place, karena bind mount tidak ikut pindah kalau folder diganti), lalu `docker compose up -d` (`--image`).
+3. Validasi **lagi di container sekali-pakai** dengan image yang sedang dipakai `airflow-scheduler` (import DAG pakai Airflow asli). Kalau gagal, `/data/airflow/dags` **tidak disentuh**.
+4. `rsync --delete` ke `/data/airflow/dags` (update in-place, karena bind mount tidak ikut pindah kalau folder diganti). Tidak perlu restart.
 
-Butuh `gcloud` di laptop dan `rsync` di VM. Mau build manual di VM: `docker build -t smi-airflow:3.1.6-dlt -f docker/Dockerfile docker/`.
+Butuh `gcloud` di laptop dan `rsync` di VM.
 
 ### 6. Airflow Connection ke SQL Server
 
-Buat **setelah** langkah 5 (container sudah jalan dengan `AIRFLOW_FERNET_KEY`, jadi password tersimpan terenkripsi). Bisa lewat UI (Admin → Connections, type **Generic**) atau CLI:
+Buat setelah Airflow jalan dengan `AIRFLOW__CORE__FERNET_KEY` terisi (`.env` pb-airflow), supaya password tersimpan terenkripsi. Jalankan dari folder `docker/` pb-airflow. Bisa lewat UI (Admin → Connections, type **Generic**) atau CLI:
 
 ```bash
 docker compose exec airflow-apiserver airflow connections add mssql_sqlserver_main \
@@ -155,7 +153,7 @@ docker compose exec airflow-apiserver airflow connections add mssql_sqlserver_ma
 
 - `schema` = nama database. Isi `extra` diteruskan sebagai atribut ODBC (driver default `ODBC Driver 18 for SQL Server`).
 - Koneksi lewat public IP **selalu terenkripsi** (`Encrypt=yes`). `TrustServerCertificate=yes` diperlukan karena sertifikat Cloud SQL ditandatangani CA per-instance, bukan CA publik. Untuk hardening: pasang `server-ca.pem` di image lalu set `no`, atau pakai Cloud SQL Auth Proxy.
-- `google_cloud_default` sudah di-set otomatis oleh override compose (pakai SA VM, project `smi-dwh`).
+- `google_cloud_default` sudah di-set otomatis oleh compose pb-airflow (pakai SA VM). Project BigQuery dikirim tiap task dari `platform.yml`.
 - Password di-mask di log dan di tab *Rendered Template*.
 
 Tes koneksi dari VM: `nc -vz <IP-public-Cloud-SQL> 1433`.
@@ -283,7 +281,7 @@ Reset satu tabel (drop tabel bronze + state, lalu load ulang dari `initial_value
 | `403 ... insufficient authentication scopes` | Access scope VM belum `cloud-platform` (setup langkah 1) |
 | `Login timeout expired` / `TCP Provider` | IP VM belum ada di authorized networks, atau IP berubah (belum statis) |
 | `SSL Provider: certificate verify failed` | Tambahkan `"TrustServerCertificate": "yes"` di extra connection |
-| `Can't open lib 'ODBC Driver 18 for SQL Server'` | Container masih pakai image lama, cek `AIRFLOW_IMAGE_NAME` di `.env` |
+| `Can't open lib 'ODBC Driver 18 for SQL Server'` | Container masih pakai image lama: di pb-airflow `docker compose build && docker compose up -d` |
 | `Cannot read and write in different locations` | Bucket lake dan dataset BQ beda region |
 | DAG tidak muncul | Cek *Import Errors* di UI / `python -m medallion.validate --dagbag`. File DAG harus mengandung kata `airflow` dan `dag` |
 | `ConfigError: ...` | Pesan menyebut file & key yang salah. YAML lain tetap jalan karena 1 file DAG per source. |
@@ -309,9 +307,9 @@ Sudah dites di sandbox (dlt 1.30.0 + Postgres 16 sebagai pengganti sumber). Hasi
 - Render template silver/gold di Airflow asli (`airflow tasks render`), syntax BigQuery via sqlglot, logika SELECT dicoba di DuckDB.
 - Kode sudah di-review oleh reviewer independen. Temuannya sudah diperbaiki: backfill paralel, paket tertunda, cursor NULL, lookback silver/gold yang sekarang dihitung dari progres tabel target.
 
-**Belum bisa dites dari sandbox** (akses registry Docker & repo Microsoft diblokir, dan tidak ada akses GCP): build `docker/Dockerfile` (instalasi `msodbcsql18`), koneksi nyata ke SQL Server via pyodbc, load job nyata ke BigQuery/GCS, dan eksekusi SQL silver/gold di BigQuery. Urutan tes pertama di VM:
+**Belum bisa dites dari sandbox** (akses registry Docker & repo Microsoft diblokir, dan tidak ada akses GCP): build Dockerfile pb-airflow (instalasi `msodbcsql18`), koneksi nyata ke SQL Server via pyodbc, load job nyata ke BigQuery/GCS, dan eksekusi SQL silver/gold di BigQuery. Urutan tes pertama di VM:
 
-1. `./scripts/deploy.sh --image`
+1. `docker compose build && docker compose up -d` di pb-airflow, lalu `./scripts/deploy.sh`
 2. Trigger `bronze__sqlserver_main` dengan param `tables: ["dbo.Product"]` (tabel kecil), lalu cek tabel BQ dan file di GCS.
 3. Trigger 1 tabel incremental dengan `backfill_start`/`backfill_end` 1 hari.
 4. Unpause kedua DAG.

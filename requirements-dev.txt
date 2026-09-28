@@ -1,6 +1,9 @@
 # Environment dev di LAPTOP (validasi, test, CLI lokal). Tidak dipakai di VM.
 #   python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt   (Windows: .venv\Scripts\pip)
--r docker/requirements-dlt.txt
+# Versi dlt & driver HARUS sama dengan venv dlt di image (pb-airflow docker/requirements-dlt.in)
+dlt[bigquery,gs,parquet,sql_database]==1.30.0
+pyodbc==5.3.0
+psycopg2-binary==2.9.13
 duckdb==1.5.5
 jinja2>=3.1
 pytest>=8
