@@ -1,8 +1,2 @@
-# Script bash harus LF walau di-clone di Windows (bash di VM gagal kalau CRLF).
-# Default LF juga untuk scripts/deploy.env yang di-`source` bash.
+# Script bash di VM gagal kalau CRLF: paksa LF walau di-clone di Windows.
 * text=auto eol=lf
-*.sh   text eol=lf
-*.py   text eol=lf
-*.sql  text eol=lf
-*.yml  text eol=lf
-*.yaml text eol=lf

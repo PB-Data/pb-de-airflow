@@ -2,17 +2,14 @@
 __pycache__/
 *.pyc
 .venv/
-venv/
 .pytest_cache/
+.pytest_tmp/
 
 # dlt lokal (JANGAN commit secrets)
 .dlt/
 **/.dlt/
-.local/
-*.duckdb
 
-# deploy & env
+# Rahasia & file kerja deploy
 scripts/deploy.env
 .deploy_tmp/
 .env
-dlt_data/

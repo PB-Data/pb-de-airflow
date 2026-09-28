@@ -1,0 +1,24 @@
+# DC Surabaya: database PB_DC_SBY di Cloud SQL for SQL Server -> bronze (GCS + BigQuery).
+# DAG: bronze__dc_sby (dags/bronze__dc_sby.py). Tambah tabel = tambah item di `tables`.
+# Nama tabel & kolom di BigQuery sama persis dengan SQL Server (AIMHeader.nomorAIM).
+
+conn_id: mssql_pb            # Airflow Connection ke instance SQL Server (lihat README)
+database: PB_DC_SBY
+schema: dbo
+# SENGAJA bukan pb_bronze_dc_sby_dbo: dataset itu milik Datastream lama dan dibaca view di
+# pb_original_data_source. Kalau dlt menulis ke sana, tabelnya tertimpa dan view-nya rusak.
+dataset: pb_bronze_dlt_dc_sby_dbo
+schedule: "0 1 * * *"        # 01:00 WIB
+file_format: parquet         # parquet | jsonl (file .jsonl.gz)
+
+tables:
+  # Tanpa `cursor` = full refresh (replace) tiap run.
+  # AIMHeader tidak punya kolom last-modified; tglApprove, StatusProses, TglUploadSAP berubah
+  # setelah baris dibuat. Tabelnya kecil (~1.300 baris), full refresh murah dan pasti benar.
+  - table: AIMHeader
+
+  # Contoh incremental (append ke bronze, duplikat dari lookback di-dedup di silver):
+  # - table: SalesOrder
+  #   cursor: ModifiedDate          # kolom NOT NULL dan ter-index
+  #   initial_value: "2024-01-01"   # run pertama ambil data sejak tanggal ini
+  #   lookback_hours: 48            # baca ulang 48 jam terakhir (jaga data telat)

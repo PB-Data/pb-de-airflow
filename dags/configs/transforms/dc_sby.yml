@@ -1,0 +1,11 @@
+# Silver & gold domain dc_sby. DAG: transform__dc_sby (dags/transform__dc_sby.py).
+# 1 file SQL = 1 task. Semua silver jalan dulu, lalu semua gold.
+# Dataset dibuat otomatis: silver_dc_sby, gold_dc_sby.
+
+# Nama source bronze: jalan setelah SEMUA tabelnya selesai di-load.
+# Alternatif: cron, mis. "0 3 * * *".
+schedule: [dc_sby]
+
+models:
+  - silver/dc_sby/aim_header.sql
+  - gold/dc_sby/aim_per_status.sql

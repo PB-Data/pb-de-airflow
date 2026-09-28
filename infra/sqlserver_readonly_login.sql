@@ -17,7 +17,7 @@ ALTER ROLE [db_datareader] ADD MEMBER [dlt_reader];
 GO
 
 -- Cek:
--- EXECUTE AS LOGIN = 'dlt_reader'; SELECT TOP 1 * FROM dbo.Customer; REVERT;
+-- EXECUTE AS LOGIN = 'dlt_reader'; SELECT TOP 1 * FROM dbo.AIMHeader; REVERT;
 
 -- Catatan performa (diskusikan dengan DBA):
 -- * Pastikan kolom cursor incremental (mis. ModifiedDate) ter-index, karena query dlt:

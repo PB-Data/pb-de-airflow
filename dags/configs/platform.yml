@@ -1,27 +1,13 @@
-# =====================================================================
-# Setting global platform data (dipakai SEMUA DAG bronze & transform)
-# =====================================================================
+# Setelan global, dipakai semua DAG bronze & transform.
 gcp:
-  bq_project: smi-dwh                # project BigQuery (BEDA dengan project Cloud SQL)
-  bq_location: asia-southeast2       # Jakarta. Dataset BQ & bucket GCS WAJIB satu region
-  gcp_conn_id: google_cloud_default  # Airflow Connection tanpa key -> pakai service account VM (ADC)
+  bq_project: smi-dwh              # project BigQuery + bucket lake (BEDA dengan project Cloud SQL)
+  bq_location: asia-southeast2     # dataset BigQuery dan bucket lake WAJIB satu region
 
 lake:
-  # TODO: ganti dengan nama bucket data lake (region asia-southeast2, project smi-dwh)
-  bucket_url: gs://smi-dwh-datalake
-  # Path file: gs://<bucket>/<dataset_bronze>/<tabel>/<YYYY>/<MM>/<DD>/<load_id>.<file_id>.parquet
-  # (tanggal = tanggal load dalam UTC; load_id = epoch waktu load, sama dengan kolom _dlt_load_id)
-  layout: "{table_name}/{YYYY}/{MM}/{DD}/{load_id}.{file_id}.{ext}"
-  # true  = file lama DISIMPAN (data lake, bisa replay/reload ke BQ kapan saja)
-  # false = perilaku default dlt: file lama per tabel dihapus sebelum load (GCS cuma staging)
-  keep_files: true
+  # File lama TIDAK dihapus: tiap run menambah file di
+  # gs://<bucket>/<dataset>/<tabel>/<YYYY>/<MM>/<DD>/<load_id>.<file_id>.<parquet|jsonl.gz>
+  bucket_url: gs://smi-dwh-datalake  # TODO: samakan dengan LAKE_BUCKET di infra/gcp_setup.sh
 
 runtime:
-  timezone: Asia/Jakarta             # timezone jadwal cron DAG
-  dlt_python: /opt/dlt-venv/bin/python  # venv dlt di dalam image Docker (repo pb-airflow, docker/Dockerfile)
-
-defaults:
-  owner: data-engineering
-  retries: 2
-  retry_delay_minutes: 5
-  email_on_failure: []               # contoh: [data-team@perusahaan.co.id] (butuh SMTP di Airflow)
+  timezone: Asia/Jakarta                # timezone jadwal cron
+  dlt_python: /opt/dlt-venv/bin/python  # venv dlt di image pb-airflow (docker/Dockerfile)

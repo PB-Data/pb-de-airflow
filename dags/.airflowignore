@@ -1,6 +1,4 @@
-# Folder non-DAG (sintaks glob / gitignore, default Airflow 3)
+# Bukan file DAG (sintaks glob, default Airflow 3)
 medallion/
 configs/
 sql/
-__pycache__/
-.local/
