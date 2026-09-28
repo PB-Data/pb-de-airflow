@@ -1,0 +1,6 @@
+# Dependency venv dlt (/opt/dlt-venv) — TERPISAH dari environment Airflow.
+# Setelah ubah file ini, generate ulang lock:
+#   uv pip compile docker/requirements-dlt.in --python-version 3.12 -o docker/requirements-dlt.txt
+dlt[bigquery,gs,parquet,sql_database]==1.30.0
+pyodbc==5.3.0            # SQL Server (butuh Microsoft ODBC Driver 18 di image)
+psycopg2-binary==2.9.13  # untuk source Postgres nanti (type: postgres)

@@ -1,6 +1,6 @@
-# Airflow 3.1.6 — LocalExecutor + Postgres container
+# Airflow 3.3.2 — LocalExecutor + Postgres container
 #
-# Diturunkan dari docker-compose.yaml resmi Airflow 3.1.6, dengan perubahan:
+# Diturunkan dari docker-compose.yaml resmi Airflow 3.3.2, dengan perubahan:
 #   - CeleryExecutor -> LocalExecutor  (redis, worker, flower dihapus)
 #   - volume bind ke /data (disk data terpisah), bukan folder lokal
 #   - mem_limit per service supaya satu task rakus tidak menjatuhkan VM
@@ -14,7 +14,7 @@ x-airflow-common: &airflow-common
   build:
     context: .
     dockerfile: Dockerfile
-  image: pb-dwh/airflow:3.1.6
+  image: pb-airflow:3.3.2
   env_file:
     - .env
   environment: &airflow-common-env
@@ -40,27 +40,18 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '4'
     AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: '1'
 
-    # --- Repo pb-dwh ---------------------------------------------------------
-    # Repo di-mount utuh, bukan folder dags saja, karena DAG mengimpor
-    # `pb_dwh` dari src/ dan membaca YAML dari config/. Deploy kode baru =
-    # `git pull` di /data/airflow/repo, tanpa rebuild image.
-    AIRFLOW__CORE__DAGS_FOLDER: /opt/pb-dwh/dags
-    PYTHONPATH: /opt/pb-dwh/src
-    PB_DWH_CONFIG_DIR: /opt/pb-dwh/config
-    PB_DWH_SQL_DIR: /opt/pb-dwh/sql
+    # --- GCP: pakai service account VM (ADC), tanpa file key ---
+    # Project BigQuery tidak ditulis di sini; DAG pb-dwh mengirim project_id
+    # sendiri (dags/configs/platform.yml).
+    AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT: '{"conn_type": "google_cloud_platform"}'
 
-    # --- dlt -----------------------------------------------------------------
-    # Dua hal yang berbeda dan sering tertukar:
-    #   DLT_PROJECT_DIR -> tempat dlt mencari .dlt/config.toml  = repo
-    #   DLT_DATA_DIR    -> tempat dlt menulis file kerja        = disk data
-    # Kalau keduanya disamakan, .dlt/config.toml di repo tidak akan terbaca
-    # dan semua setelan rotasi file di bawah ini diam-diam tidak berlaku.
-    DLT_PROJECT_DIR: /opt/pb-dwh
+    # --- dlt: state & file kerja di disk data, bukan boot disk ---
     DLT_DATA_DIR: /opt/dlt
 
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
   volumes:
-    - /data/airflow/repo:/opt/pb-dwh
+    # DAG diisi oleh deploy repo pb-dwh (rsync), bukan oleh repo ini.
+    - /data/airflow/dags:/opt/airflow/dags
     - /data/airflow/logs:/opt/airflow/logs
     - /data/airflow/config:/opt/airflow/config
     - /data/airflow/plugins:/opt/airflow/plugins
@@ -96,13 +87,8 @@ services:
     command:
       - -c
       - |
-        mkdir -p /opt/airflow/{logs,plugins,config} /opt/dlt
+        mkdir -p /opt/airflow/{logs,dags,plugins,config} /opt/dlt
         /entrypoint airflow version
-        # Pool pembatas ingestion. Tanpa ini, 100 task dlt bisa memenuhi
-        # seluruh slot dan membuat transform BigQuery antre di belakangnya.
-        # `|| true` disengaja: gagal membuat pool tidak boleh menahan
-        # seluruh stack dari start.
-        airflow pools set dlt_ingest 3 "Task ingestion dlt (bronze)" || true
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'
@@ -118,7 +104,7 @@ services:
     ports:
       - "8080:8080"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
       interval: 30s
       timeout: 10s
       retries: 5

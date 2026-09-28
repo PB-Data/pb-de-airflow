@@ -53,7 +53,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "jalankan dari dalam repo pb-dwh"
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "jalankan dari dalam repo pb-airflow"
 cd "$ROOT"
 
 CURRENT=$(git rev-parse --abbrev-ref HEAD)
@@ -66,7 +66,7 @@ case "$BRANCH" in
 esac
 
 # ---------------------------------------------------------------------------
-# 1. Cek lokal: yang akan di-deploy harus sama dengan yang sudah dites.
+# 1. Cek lokal: yang akan di-deploy harus sudah di-commit.
 # ---------------------------------------------------------------------------
 
 say "Cek lokal: $BRANCH"
@@ -74,22 +74,11 @@ if [ "$BRANCH" = "$CURRENT" ]; then
   git diff --quiet && git diff --cached --quiet \
     || die "ada perubahan yang belum di-commit. VM hanya menerima commit, jadi commit dulu (atau git stash)."
 
-  BELUM=$(git ls-files --others --exclude-standard -- config dags src sql .dlt docker)
+  BELUM=$(git ls-files --others --exclude-standard -- docker scripts)
   [ -z "$BELUM" ] || die "file baru ini belum di-commit, jadi tidak akan sampai ke VM:
 $BELUM"
-
-  PY=""
-  for kandidat in .venv/Scripts/python.exe .venv/bin/python; do
-    if [ -x "$kandidat" ]; then PY=$kandidat; break; fi
-  done
-  if [ -n "$PY" ]; then
-    "$PY" -m pytest -q || die "test gagal; perbaiki dulu sebelum deploy."
-    PYTHONPATH=src "$PY" -m pb_dwh.cli validate || die "config tidak sah; perbaiki dulu sebelum deploy."
-  else
-    echo "Tidak ada .venv, jadi pytest dan validate dilewati. Config tetap divalidasi di VM."
-  fi
 else
-  echo "Branch $BRANCH bukan branch aktif ($CURRENT): cek working tree dan test dilewati."
+  echo "Branch $BRANCH bukan branch aktif ($CURRENT): cek working tree dilewati."
 fi
 
 # ---------------------------------------------------------------------------
@@ -213,30 +202,22 @@ c() { (cd "$WD" && $D compose "${COMPOSE_ARGS[@]}" "$@"); }
 if [ "$REBUILD" = 1 ]; then
   say "docker compose up -d --build"
   c up -d --build
-elif printf '%s\n' "$BERUBAH" | grep -qxE 'docker/(Dockerfile|docker-compose\.yml)'; then
-  echo "PERHATIAN: docker/Dockerfile atau docker-compose.yml berubah, dan belum berlaku"
-  echo "sampai deploy dijalankan ulang dengan --rebuild."
+elif printf '%s\n' "$BERUBAH" | grep -qxE 'docker/(Dockerfile|docker-compose\.yml|requirements-dlt\.txt)'; then
+  echo "PERHATIAN: docker/Dockerfile, docker-compose.yml, atau requirements-dlt.txt berubah,"
+  echo "dan belum berlaku sampai deploy dijalankan ulang dengan --rebuild."
 else
   echo "Image dan compose tidak berubah; container tidak perlu di-restart."
 fi
 
-say "Validasi config di container"
-c exec -T airflow-scheduler python -m pb_dwh.cli validate </dev/null \
-  || die "config ditolak di VM (lihat pesan di atas). $BALIK"
-
+# DAG milik repo pb-dwh. Dicek di sini karena image baru bisa membuat DAG
+# yang tadinya sehat gagal di-import.
 say "Parse ulang DAG"
 c exec -T airflow-scheduler airflow dags reserialize </dev/null >/dev/null 2>&1 \
   || echo "(reserialize dilewati; DAG processor tetap mem-parse ulang sendiri dalam beberapa puluh detik)"
 c exec -T airflow-scheduler airflow dags list-import-errors </dev/null || true
-RUSAK=$(c exec -T airflow-scheduler airflow dags list -o plain </dev/null 2>/dev/null \
-  | grep -o 'bronze_ingest_RUSAK[A-Za-z0-9_]*' | sort -u || true)
 
 say "Selesai: VM di $BRANCH @ ${BARU:0:7}"
-if [ -n "$RUSAK" ]; then
-  echo "PERHATIAN: ada DAG rusak, buka tab Docs-nya di Airflow UI:"
-  echo "$RUSAK"
-  exit 1
-fi
+[ "$LAMA" = "$BARU" ] || echo "$BALIK"
 REMOTE
 )
 

@@ -1,34 +1,28 @@
 # syntax=docker/dockerfile:1
-# Airflow 3.1.6 + ODBC Driver 18 for SQL Server + dlt
+# Airflow 3.3.2 + ODBC Driver 18 for SQL Server + venv dlt terpisah
 #
 # Build:  docker compose build
-# Semua versi di-pin. Dependency Airflow dikunci lewat constraints resmi
-# supaya provider tidak saling tarik-menarik versi.
+# Tag -python3.12 WAJIB: requirements-dlt.txt di-lock untuk Python 3.12.
+# Provider google, standard, smtp sudah dibawa image resmi; tidak dipasang ulang.
 
-FROM apache/airflow:3.1.6-python3.12
+FROM apache/airflow:3.3.2-python3.12
 
-# ---------------------------------------------------------------------------
-# 1. System packages: ODBC Driver 18 for SQL Server + unixODBC
-#    Prosedur resmi Microsoft untuk Debian 12 (bookworm).
-# ---------------------------------------------------------------------------
 USER root
 
+# ---------------------------------------------------------------------------
+# 1. ODBC Driver 18 for SQL Server (dipakai pyodbc di venv dlt)
+#    Repo Microsoft dipilih sesuai versi Debian image (12 = bookworm, 13 = trixie).
+#    curl 404 = versi Debian itu belum didukung Microsoft.
+# ---------------------------------------------------------------------------
 RUN set -eux; \
+    . /etc/os-release; \
+    curl -fsSL -o /tmp/packages-microsoft-prod.deb \
+      "https://packages.microsoft.com/config/debian/${VERSION_ID%%.*}/packages-microsoft-prod.deb"; \
+    dpkg -i /tmp/packages-microsoft-prod.deb; \
+    rm /tmp/packages-microsoft-prod.deb; \
     apt-get -o DPkg::Lock::Timeout=300 update; \
-    apt-get install -y --no-install-recommends \
-        curl \
-        gnupg \
-        ca-certificates \
-        apt-transport-https; \
-    curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-        -o /etc/apt/trusted.gpg.d/microsoft.asc; \
-    curl -fsSL https://packages.microsoft.com/config/debian/12/prod.list \
-        -o /etc/apt/sources.list.d/mssql-release.list; \
-    apt-get -o DPkg::Lock::Timeout=300 update; \
-    ACCEPT_EULA=Y apt-get install -y --no-install-recommends \
-        msodbcsql18 \
-        unixodbc \
-        unixodbc-dev; \
+    ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 unixodbc; \
+    apt-get autoremove -yqq --purge; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
@@ -36,29 +30,19 @@ RUN set -eux; \
 # build berhenti di sini alih-alih gagal misterius saat runtime.
 RUN odbcinst -q -d -n "ODBC Driver 18 for SQL Server"
 
-USER airflow
-
 # ---------------------------------------------------------------------------
-# 2. Provider Airflow — dikunci constraints resmi 3.1.6
-# ---------------------------------------------------------------------------
-ARG AIRFLOW_VERSION=3.1.6
-ARG PYTHON_VERSION=3.12
-ARG CONSTRAINT_URL=https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt
-
-RUN pip install --no-cache-dir --constraint "${CONSTRAINT_URL}" \
-        apache-airflow-providers-google \
-        apache-airflow-providers-microsoft-mssql \
-        apache-airflow-providers-common-sql
-
-# ---------------------------------------------------------------------------
-# 3. dlt + driver database
-#    Sengaja TANPA constraints: dlt bukan bagian dari ekosistem Airflow.
-#    `pip check` di bawah yang menjaga tidak ada konflik tersisa.
-#
+# 2. venv dlt TERPISAH dari environment Airflow (hindari konflik dependency)
+#    DAG pb-dwh memanggilnya lewat ExternalPythonOperator
+#    (runtime.dlt_python di pb-dwh dags/configs/platform.yml).
+#    Image resmi set PIP_USER=true -> dimatikan untuk pip di dalam venv.
 #    CATATAN: paket `dlt` (Apache 2.0) saja. JANGAN `dlthub` (berbayar).
 # ---------------------------------------------------------------------------
-RUN pip install --no-cache-dir \
-        "dlt[bigquery,filesystem,parquet]==1.30.0" \
-        "pyodbc==5.2.0"
+COPY requirements-dlt.txt /tmp/requirements-dlt.txt
+RUN set -eux; \
+    python -m venv /opt/dlt-venv; \
+    PIP_USER=false /opt/dlt-venv/bin/pip install --no-cache-dir --upgrade pip; \
+    PIP_USER=false /opt/dlt-venv/bin/pip install --no-cache-dir -r /tmp/requirements-dlt.txt; \
+    chmod -R a+rX /opt/dlt-venv; \
+    /opt/dlt-venv/bin/python -c "import dlt, pyodbc; assert 'ODBC Driver 18 for SQL Server' in pyodbc.drivers(); print('dlt', dlt.__version__)"
 
-RUN pip check
+USER airflow
