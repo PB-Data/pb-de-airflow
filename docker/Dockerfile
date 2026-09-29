@@ -11,23 +11,13 @@ USER root
 
 # ---------------------------------------------------------------------------
 # 1. ODBC Driver 18 for SQL Server (dipakai pyodbc di venv dlt)
-#    Repo Microsoft dipilih sesuai versi Debian image (12 = bookworm, 13 = trixie).
-#    curl 404 = versi Debian itu belum didukung Microsoft.
+#    Sudah dibawa image resmi (msodbcsql18 + unixodbc, repo Microsoft di
+#    /etc/apt/sources.list.d/mssql-release.list). Jangan tambah repo Microsoft
+#    lagi: keyring-nya beda dan apt gagal "Conflicting values set for option
+#    Signed-By".
 # ---------------------------------------------------------------------------
-RUN set -eux; \
-    . /etc/os-release; \
-    curl -fsSL -o /tmp/packages-microsoft-prod.deb \
-      "https://packages.microsoft.com/config/debian/${VERSION_ID%%.*}/packages-microsoft-prod.deb"; \
-    dpkg -i /tmp/packages-microsoft-prod.deb; \
-    rm /tmp/packages-microsoft-prod.deb; \
-    apt-get -o DPkg::Lock::Timeout=300 update; \
-    ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 unixodbc; \
-    apt-get autoremove -yqq --purge; \
-    apt-get clean; \
-    rm -rf /var/lib/apt/lists/*
-
-# Verifikasi driver benar-benar terdaftar. Kalau baris ini gagal,
-# build berhenti di sini alih-alih gagal misterius saat runtime.
+# Verifikasi driver benar-benar terdaftar. Kalau image resmi berhenti
+# membawanya, build berhenti di sini alih-alih gagal misterius saat runtime.
 RUN odbcinst -q -d -n "ODBC Driver 18 for SQL Server"
 
 # ---------------------------------------------------------------------------
