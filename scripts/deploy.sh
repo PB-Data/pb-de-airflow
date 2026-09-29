@@ -193,6 +193,11 @@ if [ -n "$INFO" ]; then
     COMPOSE_ARGS+=(-f "$berkas")
   done
   echo "Project '$PROJ' di $WD ($CONFIG_FILES)"
+  # Stack yang jalan dari clone lain (mis. ~/pb-airflow lama) tidak memakai
+  # compose repo ini; --rebuild di sana hanya membangun ulang versi lama.
+  [ "$WD" = "$REPO/docker" ] || die "Airflow jalan dari compose di $WD, bukan $REPO/docker.
+Migrasi dulu: docker compose down di $WD (TANPA -v, volume Postgres ikut ke project '$PROJ'),
+salin $WD/.env ke $REPO/docker/.env, lalu deploy ulang."
 else
   WD="$REPO/docker"
   echo "Container airflow-scheduler tidak sedang jalan; memakai $WD."
