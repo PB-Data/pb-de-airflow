@@ -30,7 +30,9 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$KEY" > ~/.ssh/google_compute_engine
           chmod 600 ~/.ssh/google_compute_engine
-          echo "$(ssh-keygen -y -f ~/.ssh/google_compute_engine) github-deploy" > ~/.ssh/google_compute_engine.pub
+          # Must match the VM's metadata line exactly (ssh-rsa AAAA... github-deploy), or gcloud tries to add the key.
+          ssh-keygen -y -f ~/.ssh/google_compute_engine | awk '{print $1, $2, "github-deploy"}' > ~/.ssh/google_compute_engine.pub
+          ssh-keygen -lf ~/.ssh/google_compute_engine.pub  # compare with the github-deploy key on the VM if SSH fails
       # --rebuild selalu: kalau Dockerfile/compose/requirements tidak berubah, build kena cache dan
       # container tidak di-restart.
       - run: scripts/deploy.sh --rebuild
