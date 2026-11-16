@@ -35,6 +35,6 @@ jobs:
           ssh-keygen -lf ~/.ssh/google_compute_engine.pub  # compare with the github-deploy key on the VM if SSH fails
       # --rebuild selalu: kalau Dockerfile/compose/requirements tidak berubah, build kena cache dan
       # container tidak di-restart.
-      - run: scripts/deploy.sh --rebuild
+      - run: bash scripts/deploy.sh --rebuild  # bash: tidak bergantung pada executable bit
         env:
           PB_DWH_VM_USER: github-deploy
