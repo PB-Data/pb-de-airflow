@@ -22,8 +22,8 @@ RUN odbcinst -q -d -n "ODBC Driver 18 for SQL Server"
 
 # ---------------------------------------------------------------------------
 # 2. venv dlt TERPISAH dari environment Airflow (hindari konflik dependency)
-#    DAG pb-dwh memanggilnya lewat ExternalPythonOperator
-#    (runtime.dlt_python di pb-dwh dags/configs/platform.yml).
+#    DAG pb-de-warehouse memanggilnya lewat ExternalPythonOperator
+#    (runtime.dlt_python di pb-de-warehouse dags/configs/platform.yml).
 #    Image resmi set PIP_USER=true -> dimatikan untuk pip di dalam venv.
 #    CATATAN: paket `dlt` (Apache 2.0) saja. JANGAN `dlthub` (berbayar).
 # ---------------------------------------------------------------------------
@@ -36,3 +36,10 @@ RUN set -eux; \
     /opt/dlt-venv/bin/python -c "import dlt, pyodbc; assert 'ODBC Driver 18 for SQL Server' in pyodbc.drivers(); print('dlt', dlt.__version__)"
 
 USER airflow
+
+# ---------------------------------------------------------------------------
+# 3. Paket tambahan untuk python job pb-de-warehouse (jalan di environment Airflow)
+#    holidays: dim_date (libur nasional + cuti bersama Indonesia)
+#    apache-airflow ikut di-pin supaya pip tidak meng-upgrade Airflow.
+# ---------------------------------------------------------------------------
+RUN pip install --no-cache-dir "apache-airflow==3.3.2" "holidays==0.106"

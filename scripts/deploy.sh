@@ -53,7 +53,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "jalankan dari dalam repo pb-airflow"
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "jalankan dari dalam repo pb-de-airflow"
 cd "$ROOT"
 
 CURRENT=$(git rev-parse --abbrev-ref HEAD)
@@ -214,7 +214,7 @@ else
   echo "Image dan compose tidak berubah; container tidak perlu di-restart."
 fi
 
-# DAG milik repo pb-dwh. Dicek di sini karena image baru bisa membuat DAG
+# DAG milik repo pb-de-warehouse. Dicek di sini karena image baru bisa membuat DAG
 # yang tadinya sehat gagal di-import.
 say "Parse ulang DAG"
 c exec -T airflow-scheduler airflow dags reserialize </dev/null >/dev/null 2>&1 \

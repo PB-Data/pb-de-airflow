@@ -41,7 +41,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: '1'
 
     # --- GCP: pakai service account VM (ADC), tanpa file key ---
-    # Project BigQuery tidak ditulis di sini; DAG pb-dwh mengirim project_id
+    # Project BigQuery tidak ditulis di sini; DAG pb-de-warehouse mengirim project_id
     # sendiri (dags/configs/platform.yml).
     AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT: '{"conn_type": "google_cloud_platform"}'
 
@@ -50,7 +50,7 @@ x-airflow-common: &airflow-common
 
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
   volumes:
-    # DAG diisi oleh deploy repo pb-dwh (rsync), bukan oleh repo ini.
+    # DAG diisi oleh deploy repo pb-de-warehouse (rsync), bukan oleh repo ini.
     - /data/airflow/dags:/opt/airflow/dags
     - /data/airflow/logs:/opt/airflow/logs
     - /data/airflow/config:/opt/airflow/config
