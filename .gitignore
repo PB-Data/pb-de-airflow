@@ -31,3 +31,6 @@ __pycache__/
 *.xlsm
 # File kunci sementara saat dokumen Office sedang dibuka
 ~$*
+
+# macOS
+.DS_Store

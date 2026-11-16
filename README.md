@@ -1,14 +1,14 @@
-# pb-airflow — Runtime Airflow di VM
+# pb-de-airflow — Runtime Airflow di VM
 
 Repo ini hanya berisi **setup Airflow**: image, docker-compose, dan library
 tambahan yang dibutuhkan task (ODBC Driver 18, venv dlt). DAG, config pipeline,
-dan SQL ada di repo **pb-dwh**, yang men-sync DAG-nya sendiri ke
+dan SQL ada di repo **pb-de-warehouse**, yang men-sync DAG-nya sendiri ke
 `/data/airflow/dags`.
 
 | Repo | Isi | Deploy |
 |---|---|---|
-| pb-airflow (ini) | Image, compose, `.env`, library | `scripts/deploy.sh`: VM `git pull`, `--rebuild` kalau image berubah |
-| pb-dwh | DAG, config YAML, SQL | `scripts/deploy.sh` di pb-dwh: rsync ke `/data/airflow/dags` |
+| pb-de-airflow (ini) | Image, compose, `.env`, library | `scripts/deploy.sh`: VM `git pull`, `--rebuild` kalau image berubah |
+| pb-de-warehouse | DAG, config YAML, SQL | `scripts/deploy.sh` di pb-de-warehouse: rsync ke `/data/airflow/dags` |
 
 Airflow 3.3.2, LocalExecutor, metadata DB Postgres, semuanya container di satu
 VM Compute Engine.
@@ -29,7 +29,7 @@ scripts/deploy.sh         sinkronkan VM dengan branch di GitHub
 
 Kenapa image custom: image resmi `apache/airflow` tidak membawa ODBC Driver 18
 (paket apt), dan dlt bentrok dengan dependency yang dikunci Airflow. Jadi dlt
-dipasang di venv terpisah `/opt/dlt-venv`, dipanggil DAG pb-dwh lewat
+dipasang di venv terpisah `/opt/dlt-venv`, dipanggil DAG pb-de-warehouse lewat
 `ExternalPythonOperator`.
 
 ## Layout di VM
@@ -37,9 +37,9 @@ dipasang di venv terpisah `/opt/dlt-venv`, dipanggil DAG pb-dwh lewat
 | Path | Isi |
 |---|---|
 | `/data/airflow/repo` | clone repo ini; compose dijalankan dari `docker/` |
-| `/data/airflow/dags` | DAG dari pb-dwh |
+| `/data/airflow/dags` | DAG dari pb-de-warehouse |
 | `/data/airflow/{logs,config,plugins}` | milik Airflow |
-| `/data/dlt` | state & file kerja dlt (`DLT_DATA_DIR`) |
+| `/data/dlt` | file kerja dlt sementara (`DLT_DATA_DIR`), dihapus setelah task selesai |
 
 Semuanya di disk data `/data`, bukan boot disk.
 
@@ -62,8 +62,8 @@ sudo docker compose up -d --build
 
 Setelah Airflow jalan:
 
-1. Deploy DAG dari repo pb-dwh (`./scripts/deploy.sh` di pb-dwh).
-2. Buat Airflow Connection ke database sumber, ikuti README pb-dwh.
+1. Deploy DAG dari repo pb-de-warehouse (`./scripts/deploy.sh` di pb-de-warehouse).
+2. Buat Airflow Connection ke database sumber, ikuti README pb-de-warehouse.
 3. Unpause DAG (DAG baru selalu ter-pause: `DAGS_ARE_PAUSED_AT_CREATION`).
 
 Simpan salinan `AIRFLOW__CORE__FERNET_KEY` di luar VM. Kalau hilang, semua
@@ -88,7 +88,7 @@ pernah ikut; isinya diatur langsung di VM.
 `--rebuild` wajib kalau `Dockerfile`, `docker-compose.yml`, atau
 `requirements-dlt.txt` berubah. Script memberi peringatan kalau lupa. Setelah
 deploy, script mem-parse ulang DAG dan menampilkan import error, karena image
-baru bisa membuat DAG pb-dwh gagal di-import.
+baru bisa membuat DAG pb-de-warehouse gagal di-import.
 
 ## Mengubah versi
 
@@ -97,7 +97,7 @@ baru bisa membuat DAG pb-dwh gagal di-import.
 1. Edit `docker/requirements-dlt.in`.
 2. Compile ulang lock:
    `uv pip compile docker/requirements-dlt.in --python-version 3.12 -o docker/requirements-dlt.txt`
-3. Samakan versinya di `requirements-dev.txt` repo pb-dwh.
+3. Samakan versinya di `requirements-dev.txt` repo pb-de-warehouse.
 4. Commit, lalu `scripts/deploy.sh --rebuild`.
 
 Hanya paket `dlt` (Apache 2.0). Jangan pasang `dlthub`, itu produk berbayar
@@ -107,7 +107,7 @@ yang berbeda.
 
 Ganti tag `FROM` di `Dockerfile` dan `image:` di `docker-compose.yml`. Tag
 `-python3.12` wajib dipertahankan karena `requirements-dlt.txt` di-lock untuk
-Python 3.12. Cek dulu DAG pb-dwh di versi baru sebelum deploy.
+Python 3.12. Cek dulu DAG pb-de-warehouse di versi baru sebelum deploy.
 
 ---
 
@@ -141,8 +141,9 @@ Dengan LocalExecutor, task jalan sebagai subprocess di container scheduler.
 sudo docker inspect --format '{{.State.OOMKilled}}' $(sudo docker compose ps -q airflow-scheduler)
 ```
 
-Yang dicoba berurutan: kecilkan `chunk_size` tabelnya di config pb-dwh, buang
-kolom berat (`excluded_columns`), lalu kecilkan `PARALLELISM` di compose.
+Yang dicoba berurutan: kecilkan `max_active_tasks` DAG bronze (jumlah tabel yang
+di-copy bersamaan, di `dags/medallion/dags.py` pb-de-warehouse), lalu kecilkan
+`PARALLELISM` di compose.
 
 ### Disk penuh
 
@@ -158,7 +159,8 @@ Log Airflow tidak dibersihkan otomatis. Pasang cron di VM:
 0 3 * * * find /data/airflow/logs -type d -empty -delete
 ```
 
-`/data/dlt` berisi folder pipeline dlt per tabel (state + paket load). File yang
-sudah ter-load dihapus otomatis. State incremental juga tersimpan di BigQuery
-(`_dlt_pipeline_state`) dan dipulihkan dlt kalau folder lokalnya hilang, jadi
-kalau terpaksa, folder ini boleh dikosongkan saat tidak ada DAG yang jalan.
+`/data/dlt` hanya berisi folder kerja sementara per task (Parquet sebelum
+di-upload ke GCS), yang dihapus begitu task selesai. State dlt (cursor
+incremental) disimpan di bucket bronze (folder `_dlt_*`), bukan di sini. Jadi
+folder ini boleh dikosongkan saat tidak ada DAG yang jalan. Isinya yang tertinggal
+lama berarti sisa task yang mati paksa (mis. OOM).

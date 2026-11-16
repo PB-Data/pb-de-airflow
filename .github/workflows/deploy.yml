@@ -1,5 +1,5 @@
 # Deploy ke VM Airflow setiap push ke main (scripts/deploy.sh yang sama dengan dari laptop).
-# Setup sekali: infra/github_deploy_setup.sh di repo pb-dwh.
+# Setup sekali: infra/github_deploy_setup.sh di repo pb-de-warehouse.
 name: Deploy
 on:
   push:
