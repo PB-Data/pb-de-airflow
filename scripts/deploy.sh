@@ -145,7 +145,8 @@ fi
 # Dipulihkan juga kalau deploy berhenti di tengah jalan.
 trap pulihkan_pemilik EXIT
 
-if docker info >/dev/null 2>&1; then D="docker"; else D="sudo docker"; fi
+# Client compose sendiri yang membaca docker/.env (milik UID 50000, mode 600): grup docker saja tidak cukup.
+if docker info >/dev/null 2>&1 && [ -r "$REPO/docker/.env" ]; then D="docker"; else D="sudo docker"; fi
 
 say "Repo $REPO (pemilik $PEMILIK)"
 DIUBAH=$(g status --porcelain --untracked-files=no)
